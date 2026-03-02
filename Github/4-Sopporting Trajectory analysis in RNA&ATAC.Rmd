@@ -1,0 +1,1672 @@
+---
+title: "Trajectory.ATAC"
+output: html_document
+date: "2025-11-26"
+---
+
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo                  = FALSE
+                      ,warning              = FALSE
+                      ,message              = FALSE
+                      ,error                = TRUE
+                      ,dev                  = c('png','pdf')
+                      ,pdf.options(encoding = "ISOLatin9.enc", useKerning=FALSE, useDingbats=FALSE))
+
+```
+
+
+A report by **Elyas.Mohammadi**
+
+```{r libraries}
+
+# Changing the Seurat version to 5
+.libPaths("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Rloading/4.4.Spatial/")
+library(scales)
+library(ggplot2)
+
+# install.packages('Seurat')
+#unloadNamespace("Seurat")  
+library(Seurat)
+.libPaths("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Rloading/4.4")
+
+# library(data.table)
+library(harmony)
+
+
+library(ggrepel)
+library(ggpubr)
+library(patchwork)
+# library(clusterProfiler)
+# library(org.Hs.eg.db)
+library(AnnotationHub)
+# library(EnsDb.Hsapiens.v86)
+library(ggthemes)
+library(viridis)
+library(dplyr)
+library(GenomicRanges)
+library(GenomeInfoDb)
+library(tidyr)
+library(RColorBrewer)
+library(scales)
+library(gridExtra)
+library(pheatmap)
+
+library(ggh4x)
+axis <- ggh4x::guide_axis_truncated(
+  trunc_lower = unit(0, "npc"),
+  trunc_upper = unit(1.5, "cm"))
+
+library(Signac)
+
+
+```
+
+
+
+# Trajectory analysis
+
+
+```{r ECs_Arterial,fig.width=8,fig.height=5}
+
+ATAC.all <- readRDS("./ATAC.all.int3_2.splitted.Rds")
+ATAC.all$ECs_Arterial$Organ_subtypes <- paste0(ATAC.all$ECs_Arterial$Organ,"_",ATAC.all$ECs_Arterial$newL3_Subtype.multi.pred_2)
+ATAC.all$ECs_Arterial <- subset(ATAC.all$ECs_Arterial,Organ_subtypes != "Brain_aEC_2")
+ATAC.all$ECs_Arterial$Celltype_Age <- paste0(ATAC.all$ECs_Arterial$newL2_Cell_type.multi.pred,"_",ATAC.all$ECs_Arterial$Age.PCW)
+ATAC.all$ECs_Arterial$Celltype_Age <- factor(ATAC.all$ECs_Arterial$Celltype_Age,levels = rev(sort(unique(ATAC.all$ECs_Arterial$Celltype_Age))))
+
+DefaultAssay(ATAC.all$ECs_Arterial) <- "Peak.celltype"
+
+ATAC.all$ECs_Arterial <- SplitObject(ATAC.all$ECs_Arterial,split.by = "Organ")
+
+
+  
+GENES.ALL <- c("GJA4", "ARL15", "UNC5B", "C12orf75", "HEY1", "CD9", "DIAPH2", "MCTP1", "DLL4", "DST", "EYS", "JAG2", "PIK3R3", "SEMA3G", "SLC45A4")
+
+
+get_gene_window <- function(seu, gene, pad = 10000) {
+  gr <- tryCatch({
+    LookupGeneCoords(seu, gene = gene)  # returns a GRanges for this symbol
+  }, error = function(e) NULL)
+  if (is.null(gr) || length(gr) == 0) return(NULL)
+
+  # If multiple transcripts returned: take the union (covers gene body)
+  gr <- suppressWarnings(reduce(gr))
+
+  # Pad the interval
+  Extend(gr, upstream = pad, downstream = pad)
+}
+
+
+get_promoter <- function(seu, gene, upstream = 2000, downstream = 200){
+  gr <- tryCatch(LookupGeneCoords(seu, gene = gene), error = function(e) NULL)
+  if (is.null(gr) || length(gr) == 0) return(NULL)
+  # Use first transcript’s TSS for simplicity; or use promoters(gr, ...) for all
+  tss <- resize(gr[1], width = 1, fix = "start")
+  promoters(tss, upstream = upstream, downstream = downstream)
+}
+
+
+
+library(ggplot2)
+library(patchwork)
+
+fmt_mb <- function(x) sprintf("%.1f Mb", x / 1e6)
+
+GENES <- unique(GENES.ALL)  # your vector of symbols
+pics <- vector("list", length(GENES))
+
+for (n in seq_along(GENES)) {
+  gene <- GENES[n]
+
+  # 1) Build region from the gene name
+  p_ext <- get_gene_window(ATAC.all$ECs_Arterial$Brain, gene, pad = 10000)
+  if (is.null(p_ext)) {
+    message("Gene not found in annotations: ", gene)
+    next
+  }
+
+  # Optional: a small highlight (e.g., promoter) inside the padded window
+  p_hl  <- get_promoter(ATAC.all$ECs_Arterial$Brain, gene, upstream = 2000, downstream = 200)
+
+  # 2) Coverage (no gene/peak tracks here)
+  cov_panel <- CoveragePlot(
+    object          = ATAC.all$ECs_Arterial$Brain,
+    region          = p_ext,
+    region.highlight= p_hl,
+    group.by        = "Celltype_Age",
+    tile.size       = 100,
+    downsample      = TRUE,
+    annotation      = FALSE,
+    peaks           = FALSE,
+    links           = FALSE
+  ) &
+    scale_x_continuous(labels = fmt_mb, n.breaks = 4) &
+    theme(
+      axis.text.x  = element_text(size = 7, angle = 25, hjust = 1),
+      axis.title.x = element_text(size = 8)
+    ) &
+    ggtitle(gene)
+
+  # 3) Peaks track
+  peaks_panel <- PeakPlot(
+    object = ATAC.all$ECs_Arterial$Brain,
+    region = p_ext
+  ) &
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x  = element_blank(),
+      axis.ticks.x = element_blank()
+    )
+
+  # 4) Gene annotation track
+  genes_panel <- AnnotationPlot(
+    object = ATAC.all$ECs_Arterial$Brain,
+    region = p_ext
+  ) &
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x  = element_blank(),
+      axis.ticks.x = element_blank()
+    )
+
+  # 5) Stack panels
+  pics[[n]] <- cov_panel / peaks_panel / genes_panel + plot_layout(heights = c(5, 1, 1))
+}
+
+
+
+
+
+####################### Heart
+
+
+GENES.ALL <- c("APOA1", "BTNL9", "EGFL8", "GJA4", "GRIA2", "JAG2", "PRND", "SERPINE2", "SOX5", "SPECC1", "TSPAN2", "UNC5B")
+
+
+library(ggplot2)
+library(patchwork)
+
+fmt_mb <- function(x) sprintf("%.1f Mb", x / 1e6)
+
+GENES <- unique(GENES.ALL)  # your vector of symbols
+pics2 <- vector("list", length(GENES))
+
+for (n in seq_along(GENES)) {
+  gene <- GENES[n]
+
+  # 1) Build region from the gene name
+  p_ext <- get_gene_window(ATAC.all$ECs_Arterial$Heart, gene, pad = 10000)
+  if (is.null(p_ext)) {
+    message("Gene not found in annotations: ", gene)
+    next
+  }
+
+  # Optional: a small highlight (e.g., promoter) inside the padded window
+  p_hl  <- get_promoter(ATAC.all$ECs_Arterial$Heart, gene, upstream = 2000, downstream = 200)
+
+  # 2) Coverage (no gene/peak tracks here)
+  cov_panel <- CoveragePlot(
+    object          = ATAC.all$ECs_Arterial$Heart,
+    region          = p_ext,
+    region.highlight= p_hl,
+    group.by        = "Celltype_Age",
+    tile.size       = 100,
+    downsample      = TRUE,
+    annotation      = FALSE,
+    peaks           = FALSE,
+    links           = FALSE
+  ) &
+    scale_x_continuous(labels = fmt_mb, n.breaks = 4) &
+    theme(
+      axis.text.x  = element_text(size = 7, angle = 25, hjust = 1),
+      axis.title.x = element_text(size = 8)
+    ) &
+    ggtitle(gene)
+
+  # 3) Peaks track
+  peaks_panel <- PeakPlot(
+    object = ATAC.all$ECs_Arterial$Heart,
+    region = p_ext
+  ) &
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x  = element_blank(),
+      axis.ticks.x = element_blank()
+    )
+
+  # 4) Gene annotation track
+  genes_panel <- AnnotationPlot(
+    object = ATAC.all$ECs_Arterial$Heart,
+    region = p_ext
+  ) &
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x  = element_blank(),
+      axis.ticks.x = element_blank()
+    )
+
+  # 5) Stack panels
+  pics2[[n]] <- cov_panel / peaks_panel / genes_panel + plot_layout(heights = c(5, 1, 1))
+}
+
+
+
+sel <- c(4)   # regulation of neuron projection development
+
+combined <- ggarrange(plotlist = pics, ncol = 3, nrow = 5)
+combined2 <- ggarrange(plotlist = pics2, ncol = 3, nrow = 4)
+
+pdf("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Results/Manuscript/NewPLOTS/ECs_Arterial.brain.Coverage.pdf",
+    width = 10, height = 20) 
+combined
+dev.off()
+
+
+pdf("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Results/Manuscript/NewPLOTS/ECs_Arterial.heart.Coverage.pdf",
+    width = 10, height = 12) 
+combined2
+dev.off()
+```
+
+
+# All cells 
+
+```{r ECs_Arterial,fig.width=8,fig.height=5}
+
+ATAC.all <- readRDS("./ATAC.all.int3_2.Rds")
+DefaultAssay(ATAC.all) <- "ACTIVITY"
+ATAC.all$Celltype_Age <- paste0(ATAC.all$newL3_Cell_type.multi.pred,"_",ATAC.all$Age.PCW)
+
+ATAC.all <- SplitObject(ATAC.all,split.by = "Organ")
+
+
+
+#Removing the Celltype_Age <50
+keep <- as.data.frame(table(ATAC.all$Brain$Celltype_Age))[as.data.frame(table(ATAC.all$Brain$Celltype_Age))$Freq>50,]$Var1
+keep2 <- as.data.frame(table(ATAC.all$Heart$Celltype_Age))[as.data.frame(table(ATAC.all$Heart$Celltype_Age))$Freq>50,]$Var1
+
+ATAC.all$Brain <- subset(ATAC.all$Brain,Celltype_Age %in% keep)
+ATAC.all$Heart <- subset(ATAC.all$Heart,Celltype_Age %in% keep2)
+
+
+
+ATAC.all$Brain$Celltype_Age <- factor(ATAC.all$Brain$Celltype_Age,levels = rev(sort(unique(ATAC.all$Brain$Celltype_Age))))
+ATAC.all$Heart$Celltype_Age <- factor(ATAC.all$Heart$Celltype_Age,levels = rev(sort(unique(ATAC.all$Heart$Celltype_Age))))
+
+
+
+GENES.aECs <- c("GJA4", "ARL15", "UNC5B", "C12orf75", "HEY1", "CD9", "DIAPH2", "MCTP1", "DLL4", "DST", "EYS", "JAG2", "PIK3R3", "SEMA3G", "SLC45A4")
+GENES.vECs <- c("SELE", "ADGRG6", "CCL14", "CEBPD", "FNIP2", "ICAM1", "MMRN1", "PLAT", "PLVAP", "SEMA3A", "TMEM176B")
+GENES.cECs <- c("ADGRL3", "APCDD1", "CDH6", "CHGA", "HOPX", "HPGD", "SLC7A8", "SLC16A1", "SLC38A5")
+
+cols <- c("ECs_Cpillary"="#FFEEA0", "ECs_Arterial"= "#F5D27D",   "ECs_Venous"="#D84030")
+
+
+get_gene_window <- function(seu, gene, pad = 10000) {
+  gr <- tryCatch({
+    LookupGeneCoords(seu, gene = gene)  # returns a GRanges for this symbol
+  }, error = function(e) NULL)
+  if (is.null(gr) || length(gr) == 0) return(NULL)
+
+  # If multiple transcripts returned: take the union (covers gene body)
+  gr <- suppressWarnings(reduce(gr))
+
+  # Pad the interval
+  Extend(gr, upstream = pad, downstream = pad)
+}
+
+
+get_promoter <- function(seu, gene, upstream = 2000, downstream = 200){
+  gr <- tryCatch(LookupGeneCoords(seu, gene = gene), error = function(e) NULL)
+  if (is.null(gr) || length(gr) == 0) return(NULL)
+  # Use first transcript’s TSS for simplicity; or use promoters(gr, ...) for all
+  tss <- resize(gr[1], width = 1, fix = "start")
+  promoters(tss, upstream = upstream, downstream = downstream)
+}
+
+
+fmt_mb <- function(x) sprintf("%.1f Mb", x / 1e6)
+
+GENES <- unique(GENES.cECs)  # your vector of symbols
+pics <- vector("list", length(GENES))
+
+for (n in seq_along(GENES)) {
+  gene <- GENES[n]
+
+  # 1) Build region from the gene name
+  p_ext <- get_gene_window(ATAC.all$Brain, gene, pad = 10000)
+  if (is.null(p_ext)) {
+    message("Gene not found in annotations: ", gene)
+    next
+  }
+
+  # Optional: a small highlight (e.g., promoter) inside the padded window
+  p_hl  <- get_promoter(ATAC.all$Brain, gene, upstream = 2000, downstream = 200)
+
+  # 2) Coverage (no gene/peak tracks here)
+  cov_panel <- CoveragePlot(
+    object          = ATAC.all$Brain,
+    region          = p_ext,
+    # region.highlight= p_hl,
+    group.by        = "newL3_Cell_type.multi.pred",
+    tile.size       = 100,
+    downsample      = TRUE,
+    annotation      = FALSE,
+    peaks           = FALSE,
+    links           = FALSE
+  ) &
+    ggplot2::scale_x_continuous(labels = fmt_mb, n.breaks = 4) &
+    theme(
+      axis.text.x  = element_text(size = 7, angle = 25, hjust = 1),
+      axis.title.x = element_text(size = 8)
+    ) &
+    ggtitle(gene)& scale_fill_manual(values = cols)
+
+  # 3) Peaks track
+  peaks_panel <- PeakPlot(
+    object = ATAC.all$Brain,
+    region = p_ext
+  ) &
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x  = element_blank(),
+      axis.ticks.x = element_blank()
+    )
+
+  # 4) Gene annotation track
+  genes_panel <- AnnotationPlot(
+    object = ATAC.all$Heart,
+    region = p_ext
+) +
+    # make both strands the same readable color
+    scale_color_manual(values = c(`+` = "lightblue", `-` = "lightgreen"), guide = "none") +
+    scale_fill_manual(values  = c(`+` = "black", `-` = "grey"), guide = "none") +
+    theme(
+        axis.title.x = element_blank(),
+        axis.text.x  = element_blank(),
+        axis.ticks.x = element_blank()
+    )
+
+  # 5) Stack panels
+  pics[[n]] <- cov_panel / peaks_panel / genes_panel + plot_layout(heights = c(5, 1, 1))
+}
+
+
+
+combined <- ggarrange(plotlist = pics, ncol = 3, nrow = 3)
+
+pdf("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Results/Manuscript/NewPLOTS/cECs.brain.Coverage.pdf",
+    width = 10, height = 12) 
+combined
+dev.off()
+
+
+
+####################### Heart
+GENES.ALL <- c("APOA1", "BTNL9", "EGFL8", "GJA4", "GRIA2", "JAG2", "PRND", "SERPINE2", "SOX5", "SPECC1", "TSPAN2", "UNC5B")
+GENES.vECs <- c("CCL2", "C11orf96", "CEBPD", "COL3A1", "CTHRC1", "IER3", "IRF1", "KRT18", "NCOA7", "PLVAP", "POSTN", "TFPI")
+
+
+library(ggplot2)
+library(patchwork)
+
+fmt_mb <- function(x) sprintf("%.1f Mb", x / 1e6)
+
+GENES <- unique(GENES.ALL)  # your vector of symbols
+pics2 <- vector("list", length(GENES))
+
+for (n in seq_along(GENES)) {
+  gene <- GENES[n]
+
+  # 1) Build region from the gene name
+  p_ext <- get_gene_window(ATAC.all$Heart, gene, pad = 10000)
+  if (is.null(p_ext)) {
+    message("Gene not found in annotations: ", gene)
+    next
+  }
+
+  # Optional: a small highlight (e.g., promoter) inside the padded window
+  p_hl  <- get_promoter(ATAC.all$Heart, gene, upstream = 2000, downstream = 200)
+
+  # 2) Coverage (no gene/peak tracks here)
+  cov_panel <- CoveragePlot(
+    object          = ATAC.all$Heart,
+    region          = p_ext,
+    # region.highlight= p_hl,
+    group.by        = "newL3_Cell_type.multi.pred",
+    tile.size       = 100,
+    downsample      = TRUE,
+    annotation      = FALSE,
+    peaks           = FALSE,
+    links           = FALSE
+  ) &
+    ggplot2::scale_x_continuous(labels = fmt_mb, n.breaks = 4) &
+    theme(
+      axis.text.x  = element_text(size = 7, angle = 25, hjust = 1),
+      axis.title.x = element_text(size = 8)
+    ) &
+    ggtitle(gene)& scale_fill_manual(values = cols)
+
+  # 3) Peaks track
+  peaks_panel <- PeakPlot(
+    object = ATAC.all$Heart,
+    region = p_ext
+  ) &
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x  = element_blank(),
+      axis.ticks.x = element_blank()
+    )
+
+  # 4) Gene annotation track
+  genes_panel <- AnnotationPlot(
+    object = ATAC.all$Heart,
+    region = p_ext
+  ) +
+    # make both strands the same readable color
+    scale_color_manual(values = c(`+` = "lightblue", `-` = "lightgreen"), guide = "none") +
+    scale_fill_manual(values  = c(`+` = "black", `-` = "grey"), guide = "none") +
+    theme(
+        axis.title.x = element_blank(),
+        axis.text.x  = element_blank(),
+        axis.ticks.x = element_blank()
+    )
+  # 5) Stack panels
+  pics2[[n]] <- cov_panel / peaks_panel / genes_panel + plot_layout(heights = c(5, 1, 1))
+}
+
+
+combined2 <- ggarrange(plotlist = pics2, ncol = 3, nrow = 4)
+
+
+
+pdf("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Results/Manuscript/NewPLOTS/ECs.heart.Coverage.pdf",
+    width = 10, height = 12) 
+combined2
+dev.off()
+
+```
+
+
+
+
+```{r ECs_Arterial,fig.width=8,fig.height=5}
+
+ATAC.all <- readRDS("./ATAC.all.int3_2.Rds")
+DefaultAssay(ATAC.all) <- "ACTIVITY"
+ATAC.all$Celltype_Age <- paste0(ATAC.all$newL3_Cell_type.multi.pred,"_",ATAC.all$Age.PCW)
+
+ATAC.all_1 <- subset(ATAC.all,newL3_Cell_type.multi.pred %in% c("ECs_Cpillary","ECs_Arterial","ECs_Venous"))
+
+
+
+##First Set Brain
+GENES.aECs.b <- c("GJA4", "ARL15", "UNC5B", "C12orf75", "HEY1", "CD9", "DIAPH2", "MCTP1", "DLL4", "DST", "EYS", "JAG2", "PIK3R3", "SEMA3G", "SLC45A4")
+GENES.vECs.b <- c("SELE", "ADGRG6", "CCL14", "CEBPD", "FNIP2", "ICAM1", "MMRN1", "PLAT", "PLVAP", "SEMA3A", "TMEM176B")
+GENES.cECs.b <- c("ADGRL3", "APCDD1", "CDH6", "CHGA", "HOPX", "HPGD", "SLC7A8", "SLC16A1", "SLC38A5")
+
+##First Set Heart
+GENES.aECs.h <- c("APOA1", "BTNL9", "EGFL8", "GJA4", "GRIA2", "JAG2", "PRND", "SERPINE2", "SOX5", "SPECC1", "TSPAN2", "UNC5B")
+GENES.vECs.h <- c("CCL2", "C11orf96", "CEBPD", "COL3A1", "IRF1", "NCOA7",  "POSTN")
+GENES.cECs.h <- c("ABCC4", "CACNA1C", "CD36", "CLIC5", "HECW2", "KCNB2", "MEOX1", "QRFPR", "TNNT3", "VAV3")
+
+cols1 <- c("ECs_Cpillary"="#FFEEA0", "ECs_Arterial"= "#F5D27D",   "ECs_Venous"="#D84030")
+
+# aECs.avg <- as.data.frame(AverageExpression(subset(ATAC.all_1,Organ=="Brain"),features = GENES.aECs.b[-10],group.by = "newL3_Cell_type.multi.pred")$ACTIVITY)
+# vECs.avg <- as.data.frame(AverageExpression(subset(ATAC.all_1,Organ=="Brain"),features = GENES.vECs.b[-c(8,11)],group.by = "newL3_Cell_type.multi.pred")$ACTIVITY)
+# cECs.avg <- as.data.frame(AverageExpression(subset(ATAC.all_1,Organ=="Brain"),features = GENES.cECs.b[-6],group.by = "newL3_Cell_type.multi.pred")$ACTIVITY)
+
+aECs.avg <- as.data.frame(AverageExpression(subset(ATAC.all_1,Organ=="Brain"),features = unique(c(GENES.aECs.b[-10],GENES.aECs.h[-c(10,12)])),group.by = "newL3_Cell_type.multi.pred")$ACTIVITY)
+vECs.avg <- as.data.frame(AverageExpression(subset(ATAC.all_1,Organ=="Brain"),features = unique(c(GENES.vECs.b[-c(8,11)],GENES.vECs.h)),group.by = "newL3_Cell_type.multi.pred")$ACTIVITY)
+cECs.avg <- as.data.frame(AverageExpression(subset(ATAC.all_1,Organ=="Brain"),features = unique(c(GENES.cECs.b[-6],GENES.cECs.h[-c(1,6)])),group.by = "newL3_Cell_type.multi.pred")$ACTIVITY)
+
+matrix1 <- cbind(t(aECs.avg),t(cECs.avg),t(vECs.avg))
+matrix1 <- scale(matrix1)
+
+
+# aECs.avg <- as.data.frame(AverageExpression(subset(ATAC.all_1,Organ=="Heart"),features = GENES.aECs.h[-c(10,12)],group.by = c("newL3_Cell_type.multi.pred"))$ACTIVITY)
+# vECs.avg <- as.data.frame(AverageExpression(subset(ATAC.all_1,Organ=="Heart"),features = GENES.vECs.h,group.by = c("newL3_Cell_type.multi.pred"))$ACTIVITY)
+# cECs.avg <- as.data.frame(AverageExpression(subset(ATAC.all_1,Organ=="Heart"),features = GENES.cECs.h[-c(1,6)],group.by = c("newL3_Cell_type.multi.pred"))$ACTIVITY)
+
+
+aECs.avg <- as.data.frame(AverageExpression(subset(ATAC.all_1,Organ=="Heart"),features = unique(c(GENES.aECs.h[-c(10,12)],GENES.aECs.b[-10])),group.by = c("newL3_Cell_type.multi.pred"))$ACTIVITY)
+vECs.avg <- as.data.frame(AverageExpression(subset(ATAC.all_1,Organ=="Heart"),features = unique(c(GENES.vECs.h,GENES.vECs.b[-c(8,11)])),group.by = c("newL3_Cell_type.multi.pred"))$ACTIVITY)
+cECs.avg <- as.data.frame(AverageExpression(subset(ATAC.all_1,Organ=="Heart"),features = unique(c(GENES.cECs.h[-c(1,6)],GENES.cECs.b[-6])),group.by = c("newL3_Cell_type.multi.pred"))$ACTIVITY)
+
+matrix2 <- cbind(t(aECs.avg),t(cECs.avg),t(vECs.avg))
+matrix2 <- scale(matrix2)
+
+
+## --- 0) make sure they are plain matrices (scale() returns matrix with attrs) ---
+m1 <- as.matrix(matrix1); attr(m1, "scaled:center") <- NULL; attr(m1, "scaled:scale") <- NULL
+m2 <- as.matrix(matrix2); attr(m2, "scaled:center") <- NULL; attr(m2, "scaled:scale") <- NULL
+
+## --- 1) (optional but recommended) collapse duplicate gene columns inside each matrix ---
+collapse_dupe_cols <- function(M, fun = function(x) rowMeans(x, na.rm = TRUE)) {
+  idx <- split(seq_len(ncol(M)), colnames(M))
+  collapsed <- lapply(idx, function(ix) {
+    if (length(ix) == 1) M[, ix, drop = FALSE]
+    else {
+      vv <- fun(M[, ix, drop = FALSE])
+      matrix(vv, ncol = 1,
+             dimnames = list(rownames(M), colnames(M)[ix[1]]))
+    }
+  })
+  do.call(cbind, collapsed)
+}
+m1 <- collapse_dupe_cols(m1)
+m2 <- collapse_dupe_cols(m2)
+
+## --- 2) pad both to the same gene set, fill missing with 0 ---
+all_genes <- union(colnames(m1), colnames(m2))
+
+pad_cols0 <- function(M, genes) {
+  out <- matrix(0, nrow = nrow(M), ncol = length(genes),
+                dimnames = list(rownames(M), genes))
+  intersecting <- intersect(colnames(M), genes)
+  out[, intersecting] <- M[, intersecting, drop = FALSE]
+  out
+}
+m1u <- pad_cols0(m1, all_genes)
+m2u <- pad_cols0(m2, all_genes)
+
+## --- 3) disambiguate rownames and rbind ---
+rownames(m1u) <- paste0("Brain_", rownames(m1u))
+rownames(m2u) <- paste0("Heart_", rownames(m2u))
+
+merged <- rbind(m1u, m2u)
+
+gene_class <- rep("other", length(all_genes))
+names(gene_class) <- all_genes
+gene_class[names(gene_class) %in% GENES.aECs.b] <- "aECs"
+gene_class[names(gene_class) %in% GENES.cECs.b] <- "cECs"
+gene_class[names(gene_class) %in% GENES.vECs.b] <- "vECs"
+gene_class[names(gene_class) %in% GENES.aECs.h] <- "aECs"
+gene_class[names(gene_class) %in% GENES.cECs.h] <- "cECs"
+gene_class[names(gene_class) %in% GENES.vECs.h] <- "vECs"
+
+annot_col <- data.frame(Set = factor(gene_class, levels = c("aECs","cECs","vECs","other")))
+rownames(annot_col) <- colnames(merged)
+
+
+
+## ---- 1) Column annotation: EC class per gene --------------------------------
+# Mark each gene as one of: ECs_Cpillary / ECs_Arterial / ECs_Venous (else NA)
+gene2class <- rep(NA_character_, ncol(merged))
+names(gene2class) <- colnames(merged)
+
+# If you have gene lists like GENES.cECs.*, GENES.aECs.*, GENES.vECs.*, use them here:
+to_class <- function(x, tag) {
+  hits <- intersect(x, colnames(merged))
+  gene2class[hits] <<- tag
+}
+# Example (uncomment and point to your objects):
+to_class(GENES.cECs.b, "ECs_Cpillary"); to_class(GENES.cECs.h, "ECs_Cpillary")
+to_class(GENES.aECs.b, "ECs_Arterial"); to_class(GENES.aECs.h, "ECs_Arterial")
+to_class(GENES.vECs.b, "ECs_Venous");   to_class(GENES.vECs.h, "ECs_Venous")
+
+annot_col <- data.frame(
+  EC_set = factor(gene2class, levels = c("ECs_Cpillary","ECs_Arterial","ECs_Venous"))
+)
+rownames(annot_col) <- colnames(merged)
+
+# Your exact colors
+cols1 <- c("ECs_Cpillary" = "#FFEEA0", "ECs_Arterial" = "#F5D27D", "ECs_Venous" = "#D84030")
+
+
+## ---- 2) Row annotation: Organ from rowname prefix ---------------------------
+row_organ <- ifelse(grepl("^Brain_", rownames(merged)), "Brain", "Heart")
+annot_row <- data.frame(Organ = factor(row_organ, levels = c("Brain","Heart")))
+rownames(annot_row) <- rownames(merged)
+
+organ_colors <- c(Brain = "#3A86FF", Heart = "#2FBF71")
+
+ann_colors <- list(
+  EC_set = cols1,
+  Organ  = organ_colors
+)
+
+## ---- 3) Pretty labels (hide the Brain_/Heart_ prefix) -----------------------
+labels_row <- sub("^(Brain|Heart)_", "", rownames(merged))
+
+## ---- 4) Optional: group order + gaps ----------------------------------------
+# Order rows Brain then Heart, and add a gap
+row_ord <- order(annot_row$Organ)
+merged_ord <- merged[row_ord, , drop = FALSE]
+annot_row   <- annot_row[row_ord, , drop = FALSE]
+labels_row  <- labels_row[row_ord]
+gap_row <- sum(annot_row$Organ == "Brain")  # gap after Brain block
+
+# Order columns by EC class (Cpillary → Arterial → Venous → NA at end) and add gaps
+class_ord <- order(is.na(annot_col$EC_set), annot_col$EC_set)
+merged_ord <- merged_ord[, class_ord, drop = FALSE]
+annot_col   <- annot_col[class_ord, , drop = FALSE]
+gap_col <- c(
+  sum(!is.na(annot_col$EC_set) & annot_col$EC_set == "ECs_Cpillary"),
+  sum(!is.na(annot_col$EC_set) & annot_col$EC_set %in% c("ECs_Cpillary","ECs_Arterial"))
+)
+# keep only positive, unique positions
+gap_col <- unique(gap_col[gap_col > 0 & gap_col < ncol(merged_ord)])
+
+## ---- 5) Plot ----------------------------------------------------------------
+
+pdf("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Results/Manuscript/Figure4/Heatmap.ECs.Trajectory_refined.pdf",width = 10,height = 4)
+
+    pheatmap::pheatmap(
+    merged_ord,
+    color              = colorRampPalette(c("darkblue","darkblue","grey75","grey95","grey75","red","#801957"))(201),
+    breaks             = seq(-1, 1, length.out = 201),
+    annotation_row     = annot_row,
+    annotation_col = annot_col,
+    annotation_colors  = ann_colors,
+    cluster_rows       = TRUE,
+    cluster_cols       = FALSE,
+    gaps_row           = gap_row,
+    gaps_col           = gap_col,
+    labels_row         = labels_row,
+    cutree_cols = 3,
+    cutree_rows = 6,
+    show_colnames      = TRUE,           # <- no column labels
+    main               = "Brain/Heart EC lineage gene drivers"
+)
+dev.off()
+
+
+```
+
+
+## CoveragePlot
+
+```{r ECs_Arterial,fig.width=8,fig.height=5}
+
+get_gene_window <- function(seu, gene, pad = 1000) {
+  gr <- tryCatch({
+    LookupGeneCoords(seu, gene = gene)  # returns a GRanges for this symbol
+  }, error = function(e) NULL)
+  if (is.null(gr) || length(gr) == 0) return(NULL)
+
+  # If multiple transcripts returned: take the union (covers gene body)
+  gr <- suppressWarnings(reduce(gr))
+
+  # Pad the interval
+  Extend(gr, upstream = pad, downstream = pad)
+}
+
+
+get_promoter <- function(seu, gene, upstream = 2000, downstream = 200){
+  gr <- tryCatch(LookupGeneCoords(seu, gene = gene), error = function(e) NULL)
+  if (is.null(gr) || length(gr) == 0) return(NULL)
+  # Use first transcript’s TSS for simplicity; or use promoters(gr, ...) for all
+  tss <- resize(gr[1], width = 1, fix = "start")
+  promoters(tss, upstream = upstream, downstream = downstream)
+}
+
+
+fmt_mb <- function(x) sprintf("%.1f Mb", x / 1e6)
+
+
+ATAC.all_1$Celltype_Organ <- paste(ATAC.all_1$newL3_Cell_type.multi.pred,ATAC.all_1$Organ,sep = "_")
+ATAC.all_1$Celltype_Organ <- factor(ATAC.all_1$Celltype_Organ,levels = sort(unique(ATAC.all_1$Celltype_Organ)))
+DefaultAssay(ATAC.all_1) <- "Peak.celltype"
+
+GENES <- c("FNIP2","ICAM1","CEBPD","IRF1","CCL2","CD36","HECW2","CDH6","SLC7A8","UNC5B","HEY1","GJA4","TSPAN2","EGFL8")  # your vector of symbols
+GENES <- c("CDH6","CHGA","SLC7A8","VAV3","C12orf75","UNC5B","IRF1","POSTN","PLVAP")  # SECOND set of candidates
+
+cols <- c("ECs_Cpillary_Brain" = "#FFEEA0","ECs_Cpillary_Heart" = "#FFEEA0",
+           "ECs_Arterial_Brain" = "#F5D27D", "ECs_Arterial_Heart" = "#F5D27D",
+           "ECs_Venous_Brain" = "#D84030","ECs_Venous_Heart" = "#D84030")
+
+
+pics <- vector("list", length(GENES))
+
+for (n in seq_along(GENES)) {
+  gene <- GENES[n]
+
+  # # # 1) Build region from the gene name
+  # p_ext <- get_gene_window(ATAC.all_1, gene, pad = 1000)
+  # if (is.null(p_ext)) {
+  #   message("Gene not found in annotations: ", gene)
+  #   next
+  # }
+
+  # Optional: a small highlight (e.g., promoter) inside the padded window
+  # p_hl  <- get_promoter(ATAC.all_1, gene, upstream = 2000, downstream = 200)
+
+  # 2) Coverage (no gene/peak tracks here)
+  pics[[n]] <- CoveragePlot(
+    object          = ATAC.all_1,
+    features = gene,
+    expression.assay = "ACTIVITY",
+    region          = gene,
+    # region.highlight= p_hl,
+    group.by        = "Celltype_Organ",
+    tile.size       = 100,
+    downsample      = TRUE,
+    # annotation      = FALSE,
+    peaks           = FALSE,
+    links           = FALSE,
+  ) &scale_fill_manual(values = cols)
+
+  
+    # ggplot2::scale_x_continuous(labels = fmt_mb, n.breaks = 4) &
+    # &theme(
+    #   axis.text.x  = element_text(size = 7, angle = 15, hjust = 1),
+    #   axis.title.x = element_text(size = 8)
+    # ) &
+    # ggtitle(gene)
+
+#   # 3) Peaks track
+#   peaks_panel <- PeakPlot(
+#     object = ATAC.all_1,
+#     region = p_ext
+#   ) &
+#     theme(
+#       axis.title.x = element_blank(),
+#       axis.text.x  = element_blank(),
+#       axis.ticks.x = element_blank()
+#     )
+# 
+#   # 4) Gene annotation track
+#   genes_panel <- AnnotationPlot(
+#     object = ATAC.all_1,
+#     region = p_ext
+# ) +
+#     # make both strands the same readable color
+#     scale_color_manual(values = c(`+` = "lightblue", `-` = "lightgreen"), guide = "none") +
+#     scale_fill_manual(values  = c(`+` = "black", `-` = "grey"), guide = "none") +
+#     theme(
+#         axis.title.x = element_blank(),
+#         axis.text.x  = element_blank(),
+#         axis.ticks.x = element_blank()
+#     )
+# 
+#   # 5) Stack panels
+#   pics[[n]] <- cov_panel / peaks_panel / genes_panel + plot_layout(heights = c(5, 1, 1))
+}
+
+
+
+combined <- ggarrange(plotlist = pics, ncol = 5, nrow = 3)
+
+pdf("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Results/Manuscript/Figure4/ECs.Coverage.pdf",
+    width = 30, height = 12) 
+combined
+dev.off()
+
+
+combined <- ggarrange(plotlist = pics, ncol = 3, nrow = 3)
+
+pdf("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Results/Manuscript/Figure4/ECs.Coverage_2.pdf",
+    width = 15, height = 12) 
+combined
+dev.off()
+
+selected <-  c("ICAM1" , "CEBPD", "SLC7A8", "HEY1", "GJA4") 
+selected <- c("CDH6","CHGA","VAV3","C12orf75","UNC5B","IRF1","POSTN","PLVAP")  # Second set
+selected <- c("MEOX1","CCL14")  # Second set
+pics2 <- vector("list", length(selected))
+
+
+pics2[[1]] <- CoveragePlot(
+    object          = subset(ATAC.all_1,Celltype_Organ %in% c("ECs_Cpillary_Brain", "ECs_Cpillary_Heart")),
+    features = selected[[1]],
+    expression.assay = "ACTIVITY",
+    region          = selected[[1]],
+    # region.highlight= p_hl,
+    group.by        = "Celltype_Organ",
+    tile.size       = 100,
+    downsample      = TRUE,
+    # annotation      = FALSE,
+    peaks           = FALSE,
+    links           = FALSE,
+  ) &scale_fill_manual(values = cols)
+
+
+pics2[[2]] <- CoveragePlot(
+    object          = subset(ATAC.all_1,Celltype_Organ %in% c("ECs_Cpillary_Brain", "ECs_Cpillary_Heart")),
+    features = selected[[2]],
+    expression.assay = "ACTIVITY",
+    region          = selected[[2]],
+    # region.highlight= p_hl,
+    group.by        = "Celltype_Organ",
+    tile.size       = 100,
+    downsample      = TRUE,
+    # annotation      = FALSE,
+    peaks           = FALSE,
+    links           = FALSE,
+  ) &scale_fill_manual(values = cols)
+
+pics2[[3]] <- CoveragePlot(
+    object          = subset(ATAC.all_1,Celltype_Organ %in% c("ECs_Cpillary_Brain", "ECs_Cpillary_Heart")),
+    features = selected[[3]],
+    expression.assay = "ACTIVITY",
+    region          = selected[[3]],
+    # region.highlight= p_hl,
+    group.by        = "Celltype_Organ",
+    tile.size       = 100,
+    downsample      = TRUE,
+    # annotation      = FALSE,
+    peaks           = FALSE,
+    links           = FALSE,
+  ) &scale_fill_manual(values = cols)
+
+
+pics2[[4]] <- CoveragePlot(
+    object          = subset(ATAC.all_1,Celltype_Organ %in% c("ECs_Arterial_Brain", "ECs_Arterial_Heart")),
+    features = selected[[4]],
+    expression.assay = "ACTIVITY",
+    region          = selected[[4]],
+    # region.highlight= p_hl,
+    group.by        = "Celltype_Organ",
+    tile.size       = 100,
+    downsample      = TRUE,
+    # annotation      = FALSE,
+    peaks           = FALSE,
+    links           = FALSE,
+  ) &scale_fill_manual(values = cols)
+
+
+pics2[[5]] <- CoveragePlot(
+    object          = subset(ATAC.all_1,Celltype_Organ %in% c("ECs_Arterial_Brain", "ECs_Arterial_Heart")),
+    features = selected[[5]],
+    expression.assay = "ACTIVITY",
+    region          = selected[[5]],
+    # region.highlight= p_hl,
+    group.by        = "Celltype_Organ",
+    tile.size       = 100,
+    downsample      = TRUE,
+    # annotation      = FALSE,
+    peaks           = FALSE,
+    links           = FALSE,
+  ) &scale_fill_manual(values = cols)
+
+pics2[[6]] <- CoveragePlot(
+    object          = subset(ATAC.all_1,Celltype_Organ %in% c("ECs_Venous_Brain",   "ECs_Venous_Heart")),
+    features = selected[[6]],
+    expression.assay = "ACTIVITY",
+    region          = selected[[6]],
+    # region.highlight= p_hl,
+    group.by        = "Celltype_Organ",
+    tile.size       = 100,
+    downsample      = TRUE,
+    # annotation      = FALSE,
+    peaks           = FALSE,
+    links           = FALSE,
+  ) &scale_fill_manual(values = cols)
+
+pics2[[7]] <- CoveragePlot(
+    object          = subset(ATAC.all_1,Celltype_Organ %in% c("ECs_Venous_Brain",   "ECs_Venous_Heart")),
+    features = selected[[7]],
+    expression.assay = "ACTIVITY",
+    region          = selected[[7]],
+    # region.highlight= p_hl,
+    group.by        = "Celltype_Organ",
+    tile.size       = 100,
+    downsample      = TRUE,
+    # annotation      = FALSE,
+    peaks           = FALSE,
+    links           = FALSE,
+  ) &scale_fill_manual(values = cols)
+
+
+pics2[[8]] <- CoveragePlot(
+    object          = subset(ATAC.all_1,Celltype_Organ %in% c("ECs_Venous_Brain",   "ECs_Venous_Heart")),
+    features = selected[[8]],
+    expression.assay = "ACTIVITY",
+    region          = selected[[8]],
+    # region.highlight= p_hl,
+    group.by        = "Celltype_Organ",
+    tile.size       = 100,
+    downsample      = TRUE,
+    # annotation      = FALSE,
+    peaks           = FALSE,
+    links           = FALSE,
+  ) &scale_fill_manual(values = cols)
+
+
+
+for (i in 1:5) {
+pdf(paste0("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Results/Manuscript/Figure4/Coverage.example_",selected[[i]],".pdf"),
+    width = 5, height = 2.5) 
+
+print(pics2[[i]])
+  
+dev.off()
+}
+
+
+for (i in 1:8) {
+pdf(paste0("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Results/Manuscript/Figure4/Coverage.example2_",selected[[i]],".pdf"),
+    width = 5, height = 2.5) 
+
+print(pics2[[i]])
+  
+dev.off()
+
+}
+
+
+
+pdf("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Results/Manuscript/Final_refinments/Figure3/Fig3D_E/ECs.Coverage_MEOX1_CCL14.pdf",
+    width = 12, height = 2.5) 
+wrap_plots(pics2,ncol = 2)
+dev.off()
+
+
+```
+
+
+A more targeted coverage plot to find the drivers of different lineage in ECs
+
+
+```{r TRAJ.lineage,fig.width=8,fig.height=5}
+
+cols <- c("ECs_Cpillary_Brain" = "#FFEEA0","ECs_Cpillary_Heart" = "#FFEEA0",
+           "ECs_Arterial_Brain" = "#F5D27D", "ECs_Arterial_Heart" = "#F5D27D",
+           "ECs_Venous_Brain" = "#D84030","ECs_Venous_Heart" = "#D84030")
+
+
+
+aEC_genes <- c("SERPINE2","APOA1","GRIA2","TSPAN2","EGFL8","BTNL9","JAG2","GJA4","PRND","PIK3R3","ARL15","SLC45A4","DLL4","C12orf75","SEMA3G","UNC5B","HEY1")
+
+cEC_genes <- c("CD9","APCDD1","SLC38A5","SLC16A1","HOPX","CHGA","SLC7A8","CDH6","TNNT3","QRFPR","MEOX1","CLIC5","VAV3","HECW2","CD36")
+
+vEC_genes <- c("NCOA7","C11orf96","POSTN","COL3A1","CCL2","IRF1","CEBPD","MMRN1","CCL14","PLVAP","ADGRG6","SELE","ICAM1","FNIP2")
+
+pics <- list()
+pics2 <- list()
+pics3 <- list()
+
+ATAC.all_2 <- subset(ATAC.all_1,Celltype_Organ %in% c("ECs_Venous_Brain",   "ECs_Venous_Heart"))
+
+
+for (n in 1:length(vEC_genes)) {
+
+pics[[n]] <- CoveragePlot(
+    object          = ATAC.all_2,
+    features = vEC_genes[n],
+    expression.assay = "ACTIVITY",
+    region          = vEC_genes[n],
+    # region.highlight= p_hl,
+    group.by        = "Celltype_Organ",
+    tile.size       = 100,
+    downsample      = TRUE,
+    # annotation      = FALSE,
+    peaks           = FALSE,
+    links           = FALSE,
+  ) &scale_fill_manual(values = cols)
+}
+
+ATAC.all_2 <- subset(ATAC.all_1,Celltype_Organ %in% c("ECs_Cpillary_Brain", "ECs_Cpillary_Heart"))
+
+for (n in 1:length(cEC_genes)) {
+pics2[[n]] <- CoveragePlot(
+    object          = ATAC.all_2,
+    features = cEC_genes[n],
+    expression.assay = "ACTIVITY",
+    region          = cEC_genes[n],
+    # region.highlight= p_hl,
+    group.by        = "Celltype_Organ",
+    tile.size       = 100,
+    downsample      = TRUE,
+    # annotation      = FALSE,
+    peaks           = FALSE,
+    links           = FALSE,
+  ) &scale_fill_manual(values = cols)
+}
+
+ATAC.all_2 <- subset(ATAC.all_1,Celltype_Organ %in% c("ECs_Arterial_Brain", "ECs_Arterial_Heart"))
+
+for (n in 1:length(cEC_genes)) {
+pics3[[n]] <- CoveragePlot(
+    object          = ATAC.all_2,
+    features = aEC_genes[n],
+    expression.assay = "ACTIVITY",
+    region          = aEC_genes[n],
+    # region.highlight= p_hl,
+    group.by        = "Celltype_Organ",
+    tile.size       = 100,
+    downsample      = TRUE,
+    # annotation      = FALSE,
+    peaks           = FALSE,
+    links           = FALSE,
+  ) &scale_fill_manual(values = cols)
+}
+
+
+############################################################################## # Organ specific  ATAC and RNA
+# Venous 
+pics_1 <- pics[c(4,9,10)]
+
+# Capillary 
+pics2_2 <- pics2[c(2,6,7)]
+
+
+panel1 <- wrap_plots(pics_1, ncol = 3) +
+  plot_annotation(title = "# Capillary – Panel 1")
+
+panel2 <- wrap_plots(pics2_2, ncol = 3) +
+  plot_annotation(title = "# Capillary – Panel 2")
+
+final_plot <- panel1 / panel2 +
+  plot_annotation(
+    theme = theme(
+      plot.title = element_text(face = "bold", size = 18, hjust = 0)
+    )
+  )
+
+pdf("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Results/Manuscript/Figure4/ECs.Coverage(Lineage_Organ_Specific).pdf",
+    width = 18, height = 8) 
+final_plot
+dev.off()
+
+############################################################################## #Only RNA level
+
+
+
+# Venous 
+pics_1 <- pics[c(8)]
+
+# Capillary 
+pics2_2 <- pics2[c(1,5)]
+
+# Arterial 
+pics3_3 <- pics3[c(1,5,6)]
+
+
+
+panel1 <- wrap_plots(pics_1, ncol = 1) +
+  plot_annotation(title = "# Capillary – Panel 1")
+
+panel2 <- wrap_plots(pics2_2, ncol = 2) +
+  plot_annotation(title = "# Capillary – Panel 2")
+
+panel3 <- wrap_plots(pics3_3, ncol = 3) +
+  plot_annotation(title = "# Capillary – Panel 2")
+
+
+panel1_2 <- (panel1 | panel2) +
+  plot_layout(widths = c(1, 2))   # <- FORCE equal width
+
+
+final_plot <- (panel1_2)/panel3 +
+  plot_annotation(
+    theme = theme(
+      plot.title = element_text(face = "bold", size = 18, hjust = 0)
+    )
+  )
+
+pdf("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Results/Manuscript/Figure4/ECs.Coverage(Lineage_Organ_Specific_OnlyRNAlevel).pdf",
+    width = 18, height = 8) 
+final_plot
+dev.off()
+
+```
+
+
+
+
+
+I want o make the same heatmap for organ specific lineage drivers as I did for the ECs above but now for the Mural cells
+
+
+```{r ECs_Arterial,fig.width=8,fig.height=5}
+fill_map <- readRDS("../Rsave/fill_map.Rds")
+
+ATAC.all <- readRDS("./ATAC.all.int3_2.Rds")
+DefaultAssay(ATAC.all) <- "ACTIVITY"
+ATAC.all$Celltype_Age <- paste0(ATAC.all$newL3_Cell_type.multi.pred,"_",ATAC.all$Age.PCW)
+
+ATAC.all_1 <- subset(ATAC.all,newL3_Cell_type.multi.pred %in% c("Mural_Pericytes"))
+
+
+##First Set Brain
+GENES.PCs.b <- c("KCNJ8", "TESC", "CCL2","ABCC9", "ADAMTSL3", "ARHGDIB", "COL6A3", "COLEC11", "CYGB", "LAMC3", "SPON2", "THBS4")
+
+##First Set Heart
+GENES.PCs.h <- c("KCNJ8", "TESC", "CCL2","ABCC9", "ADAMTSL3", "ARHGDIB", "COL6A3", "COLEC11", "CYGB", "LAMC3", "SPON2", "THBS4")
+
+cols1 <- c("Mural_Pericytes"="#3690C0")
+
+
+aECs.avg <- as.data.frame(AverageExpression(subset(ATAC.all_1,Organ=="Brain"),features = GENES.PCs.b,group.by = "newL3_Cell_type.multi.pred")$ACTIVITY)
+
+# matrix1 <- cbind(t(aECs.avg),t(cECs.avg),t(vECs.avg))
+matrix1 <- (t(aECs.avg))
+
+aECs.avg <- as.data.frame(AverageExpression(subset(ATAC.all_1,Organ=="Heart"),features = GENES.PCs.h,group.by = c("newL3_Cell_type.multi.pred"))$ACTIVITY)
+
+# matrix2 <- cbind(t(aECs.avg),t(cECs.avg),t(vECs.avg))
+matrix2 <- (t(aECs.avg))
+
+
+## --- 0) make sure they are plain matrices (scale() returns matrix with attrs) ---
+m1 <- as.matrix(matrix1); attr(m1, "scaled:center") <- NULL; attr(m1, "scaled:scale") <- NULL
+m2 <- as.matrix(matrix2); attr(m2, "scaled:center") <- NULL; attr(m2, "scaled:scale") <- NULL
+
+## --- 1) (optional but recommended) collapse duplicate gene columns inside each matrix ---
+collapse_dupe_cols <- function(M, fun = function(x) rowMeans(x, na.rm = TRUE)) {
+  idx <- split(seq_len(ncol(M)), colnames(M))
+  collapsed <- lapply(idx, function(ix) {
+    if (length(ix) == 1) M[, ix, drop = FALSE]
+    else {
+      vv <- fun(M[, ix, drop = FALSE])
+      matrix(vv, ncol = 1,
+             dimnames = list(rownames(M), colnames(M)[ix[1]]))
+    }
+  })
+  do.call(cbind, collapsed)
+}
+m1 <- collapse_dupe_cols(m1)
+m2 <- collapse_dupe_cols(m2)
+
+## --- 2) pad both to the same gene set, fill missing with 0 ---
+all_genes <- union(colnames(m1), colnames(m2))
+
+pad_cols0 <- function(M, genes) {
+  out <- matrix(0, nrow = nrow(M), ncol = length(genes),
+                dimnames = list(rownames(M), genes))
+  intersecting <- intersect(colnames(M), genes)
+  out[, intersecting] <- M[, intersecting, drop = FALSE]
+  out
+}
+m1u <- pad_cols0(m1, all_genes)
+m2u <- pad_cols0(m2, all_genes)
+
+## --- 3) disambiguate rownames and rbind ---
+rownames(m1u) <- paste0("Brain_", rownames(m1u))
+rownames(m2u) <- paste0("Heart_", rownames(m2u))
+
+merged <- rbind(m1u, m2u)
+
+gene_class <- rep("other", length(all_genes))
+names(gene_class) <- all_genes
+gene_class[names(gene_class) %in% GENES.PCs.b] <- "PCs"
+gene_class[names(gene_class) %in% GENES.PCs.h] <- "PCs"
+
+
+annot_col <- data.frame(Set = factor(gene_class, levels = c("PCs")))
+rownames(annot_col) <- colnames(merged)
+
+
+
+## ---- 1) Column annotation: EC class per gene --------------------------------
+# Mark each gene as one of: ECs_Cpillary / ECs_Arterial / ECs_Venous (else NA)
+gene2class <- rep(NA_character_, ncol(merged))
+names(gene2class) <- colnames(merged)
+
+# If you have gene lists like GENES.cECs.*, GENES.aECs.*, GENES.vECs.*, use them here:
+to_class <- function(x, tag) {
+  hits <- intersect(x, colnames(merged))
+  gene2class[hits] <<- tag
+}
+# Example (uncomment and point to your objects):
+to_class(GENES.PCs.b, "Mural_Pericytes"); to_class(GENES.PCs.h, "Mural_Pericytes")
+
+
+annot_col <- data.frame(
+  PCs = factor(gene2class, levels = c("Mural_Pericytes"))
+)
+rownames(annot_col) <- colnames(merged)
+
+# Your exact colors
+cols1 <- c("Mural_Pericytes"="#3690C0")
+
+
+## ---- 2) Row annotation: Organ from rowname prefix ---------------------------
+row_organ <- ifelse(grepl("^Brain_", rownames(merged)), "Brain", "Heart")
+annot_row <- data.frame(Organ = factor(row_organ, levels = c("Brain","Heart")))
+rownames(annot_row) <- rownames(merged)
+
+organ_colors <- c(Brain = "#3A86FF", Heart = "#2FBF71")
+
+ann_colors <- list(
+  PCs = cols1,
+  Organ  = organ_colors
+)
+
+## ---- 3) Pretty labels (hide the Brain_/Heart_ prefix) -----------------------
+labels_row <- sub("^(Brain|Heart)_", "", rownames(merged))
+
+## ---- 4) Optional: group order + gaps ----------------------------------------
+# Order rows Brain then Heart, and add a gap
+row_ord <- order(annot_row$Organ)
+merged_ord <- merged[row_ord, , drop = FALSE]
+annot_row   <- annot_row[row_ord, , drop = FALSE]
+labels_row  <- labels_row[row_ord]
+gap_row <- sum(annot_row$Organ == "Brain")  # gap after Brain block
+
+# Order columns by EC class (Cpillary → Arterial → Venous → NA at end) and add gaps
+class_ord <- order(is.na(annot_col$PCs), annot_col$PCs)
+merged_ord <- merged_ord[, class_ord, drop = FALSE]
+annot_col   <- annot_col[class_ord, , drop = FALSE]
+gap_col <- c(
+  sum(!is.na(annot_col$PCs) & annot_col$PCs == "Mural_Pericytes"),
+  sum(!is.na(annot_col$PCs) & annot_col$PCs %in% c("Mural_Pericytes","Mural_Pericytes"))
+)
+# keep only positive, unique positions
+gap_col <- unique(gap_col[gap_col > 0 & gap_col < ncol(merged_ord)])
+
+## ---- 5) Plot ----------------------------------------------------------------
+
+pdf("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Results/Manuscript/Figure4/Heatmap.PCs.Trajectory.pdf",width = 6,height = 3.5)
+
+    pheatmap::pheatmap(
+    merged_ord,
+color = colorRampPalette(c("white","#b0c4de","#4a76b3","#0b1e63"))(201),
+    breaks             = seq(0, 2, length.out = 201),
+    annotation_row     = annot_row,
+    annotation_col = annot_col,
+    annotation_colors  = ann_colors,
+    cluster_rows       = TRUE,
+    cluster_cols       = TRUE,
+    gaps_row           = gap_row,
+    gaps_col           = gap_col,
+    labels_row         = labels_row,
+    show_colnames      = TRUE,           # <- no column labels
+    main               = "Brain/Heart PCs lineage gene drivers"
+)
+dev.off()
+
+
+```
+
+
+
+## CoveragePlot
+
+```{r ECs_Arterial,fig.width=8,fig.height=5}
+
+get_gene_window <- function(seu, gene, pad = 1000) {
+  gr <- tryCatch({
+    LookupGeneCoords(seu, gene = gene)  # returns a GRanges for this symbol
+  }, error = function(e) NULL)
+  if (is.null(gr) || length(gr) == 0) return(NULL)
+
+  # If multiple transcripts returned: take the union (covers gene body)
+  gr <- suppressWarnings(reduce(gr))
+
+  # Pad the interval
+  Extend(gr, upstream = pad, downstream = pad)
+}
+
+
+get_promoter <- function(seu, gene, upstream = 2000, downstream = 200){
+  gr <- tryCatch(LookupGeneCoords(seu, gene = gene), error = function(e) NULL)
+  if (is.null(gr) || length(gr) == 0) return(NULL)
+  # Use first transcript’s TSS for simplicity; or use promoters(gr, ...) for all
+  tss <- resize(gr[1], width = 1, fix = "start")
+  promoters(tss, upstream = upstream, downstream = downstream)
+}
+
+
+fmt_mb <- function(x) sprintf("%.1f Mb", x / 1e6)
+
+
+ATAC.all_1$Celltype_Organ <- paste(ATAC.all_1$newL3_Cell_type.multi.pred,ATAC.all_1$Organ,sep = "_")
+ATAC.all_1$Celltype_Organ <- factor(ATAC.all_1$Celltype_Organ,levels = sort(unique(ATAC.all_1$Celltype_Organ)))
+DefaultAssay(ATAC.all_1) <- "Peak.celltype"
+
+GENES <- c("KCNJ8", "TESC", "CCL2","ABCC9", "ADAMTSL3", "ARHGDIB", "COL6A3", "COLEC11", "CYGB", "LAMC3", "SPON2", "THBS4")  # your vector of symbols
+cols <- c("Mural_Pericytes_Brain"="#3690C0", "Mural_Pericytes_Heart"="#3690C0")
+
+
+pics <- vector("list", length(GENES))
+
+for (n in seq_along(GENES)) {
+  gene <- GENES[n]
+
+  # # # 1) Build region from the gene name
+  # p_ext <- get_gene_window(ATAC.all_1, gene, pad = 1000)
+  # if (is.null(p_ext)) {
+  #   message("Gene not found in annotations: ", gene)
+  #   next
+  # }
+
+  # Optional: a small highlight (e.g., promoter) inside the padded window
+  # p_hl  <- get_promoter(ATAC.all_1, gene, upstream = 2000, downstream = 200)
+
+  # 2) Coverage (no gene/peak tracks here)
+  pics[[n]] <- CoveragePlot(
+    object          = ATAC.all_1,
+    features = gene,
+    expression.assay = "ACTIVITY",
+    region          = gene,
+    # region.highlight= p_hl,
+    group.by        = "Celltype_Organ",
+    tile.size       = 100,
+    downsample      = TRUE,
+    # annotation      = FALSE,
+    peaks           = FALSE,
+    links           = FALSE,
+  ) &scale_fill_manual(values = cols)
+
+  
+    # ggplot2::scale_x_continuous(labels = fmt_mb, n.breaks = 4) &
+    # &theme(
+    #   axis.text.x  = element_text(size = 7, angle = 15, hjust = 1),
+    #   axis.title.x = element_text(size = 8)
+    # ) &
+    # ggtitle(gene)
+
+#   # 3) Peaks track
+#   peaks_panel <- PeakPlot(
+#     object = ATAC.all_1,
+#     region = p_ext
+#   ) &
+#     theme(
+#       axis.title.x = element_blank(),
+#       axis.text.x  = element_blank(),
+#       axis.ticks.x = element_blank()
+#     )
+# 
+#   # 4) Gene annotation track
+#   genes_panel <- AnnotationPlot(
+#     object = ATAC.all_1,
+#     region = p_ext
+# ) +
+#     # make both strands the same readable color
+#     scale_color_manual(values = c(`+` = "lightblue", `-` = "lightgreen"), guide = "none") +
+#     scale_fill_manual(values  = c(`+` = "black", `-` = "grey"), guide = "none") +
+#     theme(
+#         axis.title.x = element_blank(),
+#         axis.text.x  = element_blank(),
+#         axis.ticks.x = element_blank()
+#     )
+# 
+#   # 5) Stack panels
+#   pics[[n]] <- cov_panel / peaks_panel / genes_panel + plot_layout(heights = c(5, 1, 1))
+}
+
+
+
+combined <- ggarrange(plotlist = pics, ncol = 4, nrow = 3)
+
+pdf("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Results/Manuscript/Figure4/PCs.Coverage.pdf",
+    width = 25, height = 12) 
+combined
+dev.off()
+
+
+
+
+selected <-  c("ICAM1" , "CEBPD", "SLC7A8", "HEY1", "GJA4") 
+pics2 <- vector("list", length(selected))
+
+pics2[[1]] <- CoveragePlot(
+    object          = subset(ATAC.all_1,Celltype_Organ %in% c("ECs_Venous_Brain",   "ECs_Venous_Heart")),
+    features = selected[[1]],
+    expression.assay = "ACTIVITY",
+    region          = selected[[1]],
+    # region.highlight= p_hl,
+    group.by        = "Celltype_Organ",
+    tile.size       = 100,
+    downsample      = TRUE,
+    # annotation      = FALSE,
+    peaks           = FALSE,
+    links           = FALSE,
+  ) &scale_fill_manual(values = cols)
+
+pics2[[2]] <- CoveragePlot(
+    object          = subset(ATAC.all_1,Celltype_Organ %in% c("ECs_Venous_Brain",   "ECs_Venous_Heart")),
+    features = selected[[2]],
+    expression.assay = "ACTIVITY",
+    region          = selected[[2]],
+    # region.highlight= p_hl,
+    group.by        = "Celltype_Organ",
+    tile.size       = 100,
+    downsample      = TRUE,
+    # annotation      = FALSE,
+    peaks           = FALSE,
+    links           = FALSE,
+  ) &scale_fill_manual(values = cols)
+
+
+
+pics2[[3]] <- CoveragePlot(
+    object          = subset(ATAC.all_1,Celltype_Organ %in% c("ECs_Cpillary_Brain", "ECs_Cpillary_Heart")),
+    features = selected[[3]],
+    expression.assay = "ACTIVITY",
+    region          = selected[[3]],
+    # region.highlight= p_hl,
+    group.by        = "Celltype_Organ",
+    tile.size       = 100,
+    downsample      = TRUE,
+    # annotation      = FALSE,
+    peaks           = FALSE,
+    links           = FALSE,
+  ) &scale_fill_manual(values = cols)
+
+
+
+pics2[[4]] <- CoveragePlot(
+    object          = subset(ATAC.all_1,Celltype_Organ %in% c("ECs_Arterial_Brain", "ECs_Arterial_Heart")),
+    features = selected[[4]],
+    expression.assay = "ACTIVITY",
+    region          = selected[[4]],
+    # region.highlight= p_hl,
+    group.by        = "Celltype_Organ",
+    tile.size       = 100,
+    downsample      = TRUE,
+    # annotation      = FALSE,
+    peaks           = FALSE,
+    links           = FALSE,
+  ) &scale_fill_manual(values = cols)
+
+
+pics2[[5]] <- CoveragePlot(
+    object          = subset(ATAC.all_1,Celltype_Organ %in% c("ECs_Arterial_Brain", "ECs_Arterial_Heart")),
+    features = selected[[5]],
+    expression.assay = "ACTIVITY",
+    region          = selected[[5]],
+    # region.highlight= p_hl,
+    group.by        = "Celltype_Organ",
+    tile.size       = 100,
+    downsample      = TRUE,
+    # annotation      = FALSE,
+    peaks           = FALSE,
+    links           = FALSE,
+  ) &scale_fill_manual(values = cols)
+
+
+
+
+for (i in 1:5) {
+pdf(paste0("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Results/Manuscript/Figure4/Coverage.example_",selected[[i]],".pdf"),
+    width = 5, height = 2.5) 
+
+print(pics2[[i]])
+  
+dev.off()
+}
+
+```
+
+
+
+
+
+
+```{r ECs_Arterial,fig.width=8,fig.height=5}
+
+ATAC.all <- readRDS("./ATAC.all.int3_2.Rds")
+DefaultAssay(ATAC.all) <- "ACTIVITY"
+ATAC.all$Celltype_Age <- paste0(ATAC.all$newL3_Cell_type.multi.pred,"_",ATAC.all$Age.PCW)
+
+ATAC.all_1 <- subset(ATAC.all,newL3_Cell_type.multi.pred %in% c("ECs_Cpillary","ECs_Arterial","ECs_Venous"))
+
+
+##First Set Brain
+GENES.aECs.b <- c("GJA4", "ARL15", "UNC5B", "C12orf75", "HEY1", "CD9", "DIAPH2", "MCTP1", "DLL4", "DST", "EYS", "JAG2", "PIK3R3", "SEMA3G", "SLC45A4")
+GENES.vECs.b <- c("SELE", "ADGRG6", "CCL14", "CEBPD", "FNIP2", "ICAM1", "MMRN1", "PLAT", "PLVAP", "SEMA3A", "TMEM176B")
+GENES.cECs.b <- c("ADGRL3", "APCDD1", "CDH6", "CHGA", "HOPX", "HPGD", "SLC7A8", "SLC16A1", "SLC38A5")
+
+##First Set Heart
+GENES.aECs.h <- c("APOA1", "BTNL9", "EGFL8", "GJA4", "GRIA2", "JAG2", "PRND", "SERPINE2", "SOX5", "SPECC1", "TSPAN2", "UNC5B")
+GENES.vECs.h <- c("CCL2", "C11orf96", "CEBPD", "COL3A1", "IRF1", "NCOA7",  "POSTN")
+GENES.cECs.h <- c("ABCC4", "CACNA1C", "CD36", "CLIC5", "HECW2", "KCNB2", "MEOX1", "QRFPR", "TNNT3", "VAV3")
+
+cols1 <- c("ECs_Cpillary"="#FFEEA0", "ECs_Arterial"= "#F5D27D",   "ECs_Venous"="#D84030")
+
+
+aECs.avg.B <- as.data.frame(AverageExpression(subset(ATAC.all_1,Organ=="Brain"),features = c(GENES.aECs.b[-10],GENES.vECs.b[-c(8,11)],GENES.cECs.b[-6],
+                                                                                             GENES.aECs.h[-c(10,12)],GENES.vECs.h,GENES.cECs.h[-c(1,6)]
+                                                                                           ),group.by = "newL3_Cell_type.multi.pred")$ACTIVITY)
+
+matrix1 <- scale(t(aECs.avg.B))
+
+aECs.avg.H <- as.data.frame(AverageExpression(subset(ATAC.all_1,Organ=="Heart"),features = c(GENES.aECs.b[-10],GENES.vECs.b[-c(8,11)],GENES.cECs.b[-6], GENES.aECs.h[-c(10,12)],GENES.vECs.h,GENES.cECs.h[-c(1,6)]),group.by = c("newL3_Cell_type.multi.pred"))$ACTIVITY)
+
+
+matrix2 <- scale(t(aECs.avg.H))
+
+
+## --- 0) make sure they are plain matrices (scale() returns matrix with attrs) ---
+m1 <- as.matrix(matrix1); attr(m1, "scaled:center") <- NULL; attr(m1, "scaled:scale") <- NULL
+m2 <- as.matrix(matrix2); attr(m2, "scaled:center") <- NULL; attr(m2, "scaled:scale") <- NULL
+
+## --- 1) (optional but recommended) collapse duplicate gene columns inside each matrix ---
+collapse_dupe_cols <- function(M, fun = function(x) rowMeans(x, na.rm = TRUE)) {
+  idx <- split(seq_len(ncol(M)), colnames(M))
+  collapsed <- lapply(idx, function(ix) {
+    if (length(ix) == 1) M[, ix, drop = FALSE]
+    else {
+      vv <- fun(M[, ix, drop = FALSE])
+      matrix(vv, ncol = 1,
+             dimnames = list(rownames(M), colnames(M)[ix[1]]))
+    }
+  })
+  do.call(cbind, collapsed)
+}
+m1 <- collapse_dupe_cols(m1)
+m2 <- collapse_dupe_cols(m2)
+
+## --- 2) pad both to the same gene set, fill missing with 0 ---
+all_genes <- union(colnames(m1), colnames(m2))
+
+pad_cols0 <- function(M, genes) {
+  out <- matrix(0, nrow = nrow(M), ncol = length(genes),
+                dimnames = list(rownames(M), genes))
+  intersecting <- intersect(colnames(M), genes)
+  out[, intersecting] <- M[, intersecting, drop = FALSE]
+  out
+}
+m1u <- pad_cols0(m1, all_genes)
+m2u <- pad_cols0(m2, all_genes)
+
+## --- 3) disambiguate rownames and rbind ---
+rownames(m1u) <- paste0("Brain_", rownames(m1u))
+rownames(m2u) <- paste0("Heart_", rownames(m2u))
+
+merged <- rbind(m1u, m2u)
+
+gene_class <- rep("other", length(all_genes))
+names(gene_class) <- all_genes
+gene_class[names(gene_class) %in% GENES.aECs.b] <- "aECs"
+gene_class[names(gene_class) %in% GENES.cECs.b] <- "cECs"
+gene_class[names(gene_class) %in% GENES.vECs.b] <- "vECs"
+gene_class[names(gene_class) %in% GENES.aECs.h] <- "aECs"
+gene_class[names(gene_class) %in% GENES.cECs.h] <- "cECs"
+gene_class[names(gene_class) %in% GENES.vECs.h] <- "vECs"
+
+annot_col <- data.frame(Set = factor(gene_class, levels = c("aECs","cECs","vECs","other")))
+rownames(annot_col) <- colnames(merged)
+
+
+
+## ---- 1) Column annotation: EC class per gene --------------------------------
+# Mark each gene as one of: ECs_Cpillary / ECs_Arterial / ECs_Venous (else NA)
+gene2class <- rep(NA_character_, ncol(merged))
+names(gene2class) <- colnames(merged)
+
+# If you have gene lists like GENES.cECs.*, GENES.aECs.*, GENES.vECs.*, use them here:
+to_class <- function(x, tag) {
+  hits <- intersect(x, colnames(merged))
+  gene2class[hits] <<- tag
+}
+# Example (uncomment and point to your objects):
+to_class(GENES.cECs.b, "ECs_Cpillary"); to_class(GENES.cECs.h, "ECs_Cpillary")
+to_class(GENES.aECs.b, "ECs_Arterial"); to_class(GENES.aECs.h, "ECs_Arterial")
+to_class(GENES.vECs.b, "ECs_Venous");   to_class(GENES.vECs.h, "ECs_Venous")
+
+annot_col <- data.frame(
+  EC_set = factor(gene2class, levels = c("ECs_Cpillary","ECs_Arterial","ECs_Venous"))
+)
+rownames(annot_col) <- colnames(merged)
+
+# Your exact colors
+cols1 <- c("ECs_Cpillary" = "#FFEEA0", "ECs_Arterial" = "#F5D27D", "ECs_Venous" = "#D84030")
+
+
+## ---- 2) Row annotation: Organ from rowname prefix ---------------------------
+row_organ <- ifelse(grepl("^Brain_", rownames(merged)), "Brain", "Heart")
+annot_row <- data.frame(Organ = factor(row_organ, levels = c("Brain","Heart")))
+rownames(annot_row) <- rownames(merged)
+
+organ_colors <- c(Brain = "#3A86FF", Heart = "#2FBF71")
+
+ann_colors <- list(
+  EC_set = cols1,
+  Organ  = organ_colors
+)
+
+## ---- 3) Pretty labels (hide the Brain_/Heart_ prefix) -----------------------
+labels_row <- sub("^(Brain|Heart)_", "", rownames(merged))
+
+## ---- 4) Optional: group order + gaps ----------------------------------------
+# Order rows Brain then Heart, and add a gap
+row_ord <- order(annot_row$Organ)
+merged_ord <- merged[row_ord, , drop = FALSE]
+annot_row   <- annot_row[row_ord, , drop = FALSE]
+labels_row  <- labels_row[row_ord]
+gap_row <- sum(annot_row$Organ == "Brain")  # gap after Brain block
+
+# Order columns by EC class (Cpillary → Arterial → Venous → NA at end) and add gaps
+class_ord <- order(is.na(annot_col$EC_set), annot_col$EC_set)
+merged_ord <- merged_ord[, class_ord, drop = FALSE]
+annot_col   <- annot_col[class_ord, , drop = FALSE]
+gap_col <- c(
+  sum(!is.na(annot_col$EC_set) & annot_col$EC_set == "ECs_Cpillary"),
+  sum(!is.na(annot_col$EC_set) & annot_col$EC_set %in% c("ECs_Cpillary","ECs_Arterial"))
+)
+# keep only positive, unique positions
+gap_col <- unique(gap_col[gap_col > 0 & gap_col < ncol(merged_ord)])
+
+## ---- 5) Plot ----------------------------------------------------------------
+
+pdf("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Results/Manuscript/Figure4/Heatmap.ECs.Trajectory2.pdf",width = 10,height = 4)
+
+    pheatmap::pheatmap(
+    merged_ord,
+    color              = colorRampPalette(c("darkblue","grey95","#801957"))(201),
+    breaks             = seq(-1, 1, length.out = 201),
+    annotation_row     = annot_row,
+    annotation_col = annot_col,
+    annotation_colors  = ann_colors,
+    cluster_rows       = TRUE,
+    cluster_cols       = TRUE,
+    gaps_row           = gap_row,
+    gaps_col           = gap_col,
+    labels_row         = labels_row,
+    cutree_cols = 3,
+    cutree_rows = 6,
+    show_colnames      = TRUE,           # <- no column labels
+    main               = "Brain/Heart EC lineage gene drivers"
+)
+dev.off()
+
+
+```
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,1805 @@
+---
+title: "ISS"
+output: html_document
+date: "2025-10-27"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+
+```{r library,fig.width=20,fig.height=10}
+
+.libPaths("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Rloading/4.4/")
+library(purrr); library(stringr)
+
+library(dplyr)
+library(tidyr)
+library(harmony)
+library(ggplot2)
+library(patchwork)
+library(ggpubr)
+library(glmGamPoi)
+library(ggh4x)
+
+axis.UMAP <- ggh4x::guide_axis_truncated(
+  trunc_lower = unit(0, "npc"),
+  trunc_upper = unit(1.5, "cm"))
+
+.libPaths("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Rloading/4.4.Spatial/")
+library(Seurat)
+
+```
+
+
+
+
+```{r loading,fig.width=20,fig.height=10}
+
+path <- "../Data/ISS"
+coords_list <- list()
+
+# get only subdirectories, not the parent path itself
+dirs <- list.dirs(path, full.names = TRUE, recursive = FALSE)
+
+# we'll store all matrices here, named by sample
+sc_list <- list()
+
+for (d in dirs) {
+  sample_name <- basename(d)  # e.g. "PCW7.Heart"
+  message("Processing: ", sample_name)
+
+  file_path <- file.path(d, "GeneCoord.csv")
+  if (!file.exists(file_path)) {
+    warning("Skipping ", sample_name, ": no GeneCoord.csv")
+    next
+  }
+
+  # 1. read CSV (comma-separated)
+  df <- read.csv(file_path, stringsAsFactors = FALSE)
+
+  # make sure coords are numeric (robust to weird CSV parsing)
+  df$x_location <- as.numeric(df$x_location)
+  df$y_location <- as.numeric(df$y_location)
+  cell_xy_ref <- df %>%
+    group_by(cell) %>%
+    summarise(
+      centroid_x = mean(x_location, na.rm = TRUE),
+      centroid_y = mean(y_location, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    select(cell, centroid_x, centroid_y)
+  cell_xy_ref$sample_name <- sample_name
+  cell_xy_ref$cell_ids <- cell_xy_ref$cell
+  coords_list[[sample_name]] <- cell_xy_ref
+  
+  # 2. collapse to counts per gene per cell
+  wide_df <- df %>%
+    group_by(feature_name, cell) %>%
+    summarise(count = n(), .groups = "drop") %>%
+    pivot_wider(
+      names_from = cell,
+      values_from = count,
+      values_fill = 0
+    )
+  
+  # 3. make rownames = gene, drop the feature_name column
+  wide_df <- as.data.frame(wide_df)
+  rownames(wide_df) <- wide_df$feature_name
+  wide_df$feature_name <- NULL
+
+  colnames(wide_df) <- paste(colnames(wide_df),sample_name,sep = "_")
+
+
+  # 4. convert to matrix
+  wide_df <- as.matrix(wide_df)
+  sc <- CreateSeuratObject(wide_df,project = sample_name,assay = "ISS")
+  sc$orig.ident <- sample_name
+
+  # 5. store in the list
+  sc_list[[sample_name]] <- sc
+  print(sample_name)
+}
+
+saveRDS(sc_list,"../Rsave/ISS_scObject.Rds")
+
+coords <-as.data.frame(dplyr::bind_rows(coords_list))
+rownames(coords) <- paste(coords$cell_ids,coords$sample_name,sep = "_")
+
+saveRDS(coords,"./Coordinates.Rds")
+
+
+```
+
+
+```{r scObject,fig.width=20,fig.height=10}
+scObject <- readRDS("../Rsave/ISS_scObject.Rds")
+
+options(future.globals.maxSize = 64000 * 1024^2)
+
+
+pic <- list()
+for (n in 1:length(scObject)) {
+ pic[[n]] <- VlnPlot(scObject[[n]], features = c("nFeature_ISS","nCount_ISS"),
+              group.by = "orig.ident", pt.size = 0) &
+    ylab("Heart") &
+    scale_y_continuous(breaks = seq(0, 100, 5), limits = c(0, 100), expand = expansion(mult = 0))&ylab(unique(scObject[[n]]$orig.ident))
+}
+
+pdf("../Results/ISS/VLN.pdf",width = 15,height = 12)
+wrap_plots(pic,ncol = 4)
+dev.off()
+
+
+
+maxfeature <- c(45,50,15,50,55,40,50)
+minfeature <- c(5,7,7,7,7,5,7)
+
+for (n in 1:length(scObject)) {
+scObject[[n]] <- subset(scObject[[n]],nFeature_ISS > minfeature[n] & nFeature_ISS < maxfeature[n])
+scObject[[n]] <- SCTransform(
+    scObject[[n]],
+    assay = DefaultAssay(scObject[[n]]),     # usually "ISS" or "RNA"
+    method = "glmGamPoi",
+    variable.features.n = Inf,               # small panel: keep all genes
+    verbose = FALSE
+  )
+}
+
+# for (n in 1:length(scObject)) {
+#   scObject[[n]] <- NormalizeData(scObject[[n]])
+# }
+
+
+
+pic <- list()
+for (n in 1:length(scObject)) {
+ pic[[n]] <- VlnPlot(scObject[[n]], features = c("nFeature_ISS","nCount_ISS"),
+              group.by = "orig.ident", pt.size = 0) &
+    ylab("Heart") &
+    scale_y_continuous(breaks = seq(0, 100, 5), limits = c(0, 100), expand = expansion(mult = 0))&ylab(unique(scObject[[n]]$orig.ident))
+}
+
+pdf("../Results/ISS/VLN_filtered.pdf",width = 15,height = 12)
+wrap_plots(pic,ncol = 4)
+dev.off()
+
+
+scObject.Brain <- Reduce(merge,scObject[c(1,6)])
+scObject.Heart <- Reduce(merge,scObject[c(2,4,5,7)])
+
+
+
+
+scObject.Brain$Age.PCW <- gsub("_.*","",scObject.Brain$orig.ident)
+scObject.Brain$Organ <- gsub(".*_","",scObject.Brain$orig.ident)
+scObject.Heart$Age.PCW <- gsub("_.*","",scObject.Heart$orig.ident)
+scObject.Heart$Organ <- gsub(".*_","",scObject.Heart$orig.ident)
+
+
+# choose features for PCA — with small ISS panels, just use all genes present
+VariableFeatures(scObject.Brain) <- rownames(scObject.Brain)
+VariableFeatures(scObject.Heart) <- rownames(scObject.Heart)
+
+# PCA on SCT residuals (no ScaleData needed for SCT)
+scObject.Brain <- RunPCA(scObject.Brain, assay = "SCT",
+                 features = VariableFeatures(scObject.Brain),
+                 npcs = 20, verbose = FALSE)
+# PCA on SCT residuals (no ScaleData needed for SCT)
+scObject.Heart <- RunPCA(scObject.Heart, assay = "SCT",
+                 features = VariableFeatures(scObject.Heart),
+                 npcs = 20, verbose = FALSE)
+
+
+
+
+scObject.Brain <- RunHarmony(scObject.Brain,
+  group.by.vars="Age.PCW",
+  reduction.use = "pca",
+  dims.use = 1:20,
+  verbose = TRUE,
+  reduction.save = "harmony",
+  project.dim = TRUE,max_iter = 10)
+
+
+scObject.Heart <- RunHarmony(scObject.Heart,
+  group.by.vars="Age.PCW",
+  reduction.use = "pca",
+  dims.use = 1:20,
+  verbose = TRUE,
+  reduction.save = "harmony",
+  project.dim = TRUE,max_iter = 10)
+
+
+scObject.Brain <- RunUMAP(scObject.Brain,1:20,reduction ="harmony",reduction.name = "umap_harmomy")
+scObject.Heart <- RunUMAP(scObject.Heart,1:20,reduction ="harmony",reduction.name = "umap_harmomy")
+
+
+save(scObject.Brain,scObject.Heart,file = "../Rsave/scObject.Heart_Brain.Rdata")
+
+```
+
+
+```{r scObject,fig.width=20,fig.height=10}
+
+scRNA <- readRDS("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Rsave/OMIX008302-02.rds")
+Metadata_ENatlas_all <- read.delim("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Rsave/Metadata_ENatlas_all.txt")
+scRNA@meta.data <- Metadata_ENatlas_all[match(rownames(Metadata_ENatlas_all),rownames(scRNA@meta.data)),]
+
+scRNA <- SplitObject(scRNA,split.by = "Organ")
+
+
+options(future.globals.maxSize = 64000 * 1024^2)
+
+gc()
+
+# SCTransform each organ reference
+for (k in names(scRNA)) {
+  scRNA[[k]] <- SCTransform(scRNA[[k]], method = "glmGamPoi",
+                           variable.features.n = 3000,  # for scRNA you can keep HVGs
+                           verbose = FALSE)
+  scRNA[[k]] <- RunPCA(scRNA[[k]], assay = "SCT", npcs = 30, verbose = FALSE)
+  # UMAP is optional but useful for projection later:
+  scRNA[[k]] <- RunUMAP(scRNA[[k]], reduction = "pca", dims = 1:30,
+                       return.model = TRUE, reduction.name = "umap_ref")
+}
+
+saveRDS(scRNA,"/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Rsave/OMIX008302-02_SCT.rds")
+
+
+```
+
+
+```{r scObject,fig.width=20,fig.height=10}
+
+load(file = "../Rsave/scObject.Heart_Brain.Rdata")
+scRNA <-  readRDS("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Rsave/OMIX008302-02_SCT.rds")
+
+"%Nin%" <- Negate("%in%")
+scRNA$Brain <- subset(scRNA$Brain, newL3_Cell_type %Nin% c("Debri","Doublet","SinusVenosus_related"))
+scRNA$Heart <- subset(scRNA$Heart, newL3_Cell_type %Nin% c("Debri","Doublet"))
+
+
+
+common_genes <- list(
+  Brain = intersect(rownames(scRNA$Brain), rownames(scObject.Brain)),
+  Heart = intersect(rownames(scRNA$Heart), rownames(scObject.Heart))
+)
+sapply(common_genes, length)  # sanity: should be close to your panel size
+
+options(future.globals.maxSize = 64000 * 1024^2)
+
+# 1) Find anchors (SCT→SCT). Use only common genes.
+anchors_brain <- FindTransferAnchors(
+  reference = scRNA$Brain,
+  query     = scObject.Brain,
+  normalization.method = "SCT",
+  reference.reduction  = "pca",
+  dims      = 1:30, 
+  features = common_genes$Brain
+)
+
+# 2) Transfer labels
+pred_brain <- TransferData(
+  anchorset = anchors_brain,
+  refdata   = scRNA$Brain$newL3_Cell_type,   # <-- replace with your column in scRNA meta
+  dims      = 1:30
+)
+
+scObject.Brain <- AddMetaData(scObject.Brain, pred_brain)
+
+save(scObject.Brain,scObject.Heart,file = "../Rsave/scObject.Heart_Brain_LABEL.transfered.Rdata")
+
+######################
+
+
+# 1) Find anchors (SCT→SCT). Use only common genes.
+anchors_heart <- FindTransferAnchors(
+  reference = scRNA$Heart,
+  query     = scObject.Heart,
+  normalization.method = "SCT",
+  reference.reduction  = "pca",
+  dims      = 1:30,
+  features = common_genes$Heart
+)
+
+# 2) Transfer labels
+pred_heart <- TransferData(
+  anchorset = anchors_heart,
+  refdata   = scRNA$Heart$newL3_Cell_type,   # <-- replace with your column in scRNA meta
+  dims      = 1:30
+)
+
+scObject.Heart <- AddMetaData(scObject.Heart, pred_heart)
+
+
+save(scObject.Brain,scObject.Heart,file = "../Rsave/scObject.Heart_Brain_LABEL.transfered.Rdata")
+
+
+# DimPlot(scObject.Brain,group.by = "predicted.id",reduction = "umap_harmomy" )
+# DimPlot(scObject.Heart,group.by = "predicted.id" ,reduction = "umap_harmomy")
+# 
+# 
+# FeaturePlot(scObject.Brain,features = "prediction.score.NPCs")
+# FeaturePlot(scObject.Heart,features = "prediction.score.NPCs")
+
+```
+
+
+
+```{r loading,fig.width=20,fig.height=10}
+load(file = "../Rsave/scObject.Heart_Brain.Rdata")
+
+
+
+scObject.Brain.down <- SketchData(
+  object = scObject.Brain,
+  ncells = 600000,            # choose e.g. 50k–150k depending on size
+  method = "LeverageScore",   # good default
+  sketched.assay = "sketch",
+)
+
+scObject.Heart.down <- SketchData(
+  object = scObject.Heart,
+  ncells = 500000,            # choose e.g. 50k–150k depending on size
+  method = "LeverageScore",   # good default
+  sketched.assay = "sketch",
+)
+
+rm(scObject.Brain,scObject.Heart)
+gc()
+# load(file = "../Rsave/scObject.Heart_Brain.down.alg.2.Rdata")
+
+
+options(future.globals.maxSize = 64000 * 1024^2)
+
+# Cosine tends to work better than Euclidean for short gene panels
+scObject.Brain.down <- FindNeighbors(
+  scObject.Brain.down,
+  reduction    = "harmony",
+  dims         = 1:20,            # 10–20; pick via ElbowPlot
+  k.param      = 50,              # neighborhood size
+  nn.method    = "annoy",
+  annoy.metric = "cosine",        # << key change
+  graph.name   = c("Sketch_snn","Sketch_knn")  # avoid name clashes
+)
+
+scObject.Heart.down <- FindNeighbors(
+  scObject.Heart.down,
+  reduction    = "harmony",
+  dims         = 1:20,
+  k.param      = 50,
+  nn.method    = "annoy",
+  annoy.metric = "cosine",
+  graph.name   = c("Sketch_snn","Sketch_knn")
+)
+
+
+coords <- readRDS("./Coordinates.Rds")
+
+scObject.Brain.down@meta.data[9:10] <- coords[match(rownames(scObject.Brain.down@meta.data),rownames(coords)),][2:3]
+scObject.Heart.down@meta.data[9:10] <- coords[match(rownames(scObject.Heart.down@meta.data),rownames(coords)),][2:3]
+
+save(scObject.Brain.down,scObject.Heart.down,file = "../Rsave/scObject.Heart_Brain.down.alg.2_sketch.Rdata")
+
+
+scObject.Brain.down <- FindClusters(scObject.Brain.down,resolution = c(0.3,0.5,0.8,1),algorithm=2,graph.name ="Sketch_knn" )
+scObject.Heart.down <- FindClusters(scObject.Heart.down,resolution = c(0.3,0.5,0.8,1),algorithm=2,graph.name ="Sketch_knn")
+
+# save(scObject.Brain.down,scObject.Heart.down,file = "../Rsave/scObject.Heart_Brain.down.Rdata")
+save(scObject.Brain.down,scObject.Heart.down,file = "../Rsave/scObject.Heart_Brain.down.alg.2_sketch.Rdata")
+```
+
+
+```{r scObject,fig.width=20,fig.height=10}
+library(purrr); library(stringr)
+
+load(file = "../Rsave/scObject.Heart_Brain.down.alg.2_sketch_2.Rdata")
+scObject.Brain.down2 <- scObject.Brain.down
+scObject.Heart.down2 <- scObject.Heart.down
+
+scObject.Brain.down2$cell <- map2_chr(colnames(scObject.Brain.down2), scObject.Brain.down2$orig.ident, ~ str_remove(.x, fixed(paste0("_", .y))))
+scObject.Heart.down2$cell <- map2_chr(colnames(scObject.Heart.down2), scObject.Heart.down2$orig.ident, ~ str_remove(.x, fixed(paste0("_", .y))))
+
+load(file = "../Rsave/scObject.Heart_Brain.down.alg.2_sketch.Rdata")
+
+
+
+scObject.Brain.down$cell <- map2_chr(colnames(scObject.Brain.down), scObject.Brain.down$orig.ident, ~ str_remove(.x, fixed(paste0("_", .y))))
+scObject.Heart.down$cell <- map2_chr(colnames(scObject.Heart.down), scObject.Heart.down$orig.ident, ~ str_remove(.x, fixed(paste0("_", .y))))
+
+
+# columns you want to bring from down2
+cols_to_add <- colnames(scObject.Brain.down2@meta.data)[c(13,14,15,16,17,23)]
+# create the columns in down (all NA by default)
+for (cn in cols_to_add) {
+  scObject.Brain.down@meta.data[[cn]] <- NA
+}
+# find overlapping cells (cell names are rownames of meta.data)
+common_cells <- intersect(
+  rownames(scObject.Brain.down@meta.data),
+  rownames(scObject.Brain.down2@meta.data)
+)
+
+# fill only those rows; everything else stays NA
+scObject.Brain.down@meta.data[common_cells, cols_to_add] <-
+  scObject.Brain.down2@meta.data[common_cells, cols_to_add, drop = FALSE]
+
+
+# columns you want to bring from down2
+cols_to_add <- colnames(scObject.Brain.down2@meta.data)[c(13,14,15,16,17,23)]
+# create the columns in down (all NA by default)
+for (cn in cols_to_add) {
+  scObject.Brain.down@meta.data[[cn]] <- NA
+}
+# find overlapping cells (cell names are rownames of meta.data)
+common_cells <- intersect(
+  rownames(scObject.Brain.down@meta.data),
+  rownames(scObject.Brain.down2@meta.data)
+)
+
+# fill only those rows; everything else stays NA
+scObject.Brain.down@meta.data[common_cells, cols_to_add] <-
+  scObject.Brain.down2@meta.data[common_cells, cols_to_add, drop = FALSE]
+
+# columns you want to bring from down2
+cols_to_add <- colnames(scObject.Heart.down2@meta.data)[c(13,14,15,16,17,23)]
+# create the columns in down (all NA by default)
+for (cn in cols_to_add) {
+  scObject.Heart.down@meta.data[[cn]] <- NA
+}
+# find overlapping cells (cell names are rownames of meta.data)
+common_cells <- intersect(
+  rownames(scObject.Heart.down@meta.data),
+  rownames(scObject.Heart.down2@meta.data)
+)
+
+scObject.Heart.down@meta.data[common_cells, cols_to_add] <-
+  scObject.Heart.down2@meta.data[common_cells, cols_to_add, drop = FALSE]
+
+save(scObject.Brain.down,scObject.Heart.down,file = "../Rsave/scObject.Heart_Brain.down.alg.2_sketch.Rdata")
+
+
+
+
+
+load(file = "../Rsave/scObject.Heart_Brain.down.alg.2_sketch.Rdata")
+
+scObject.Brain.down <- SplitObject(scObject.Brain.down,split.by = "orig.ident")
+scObject.Heart.down <- SplitObject(scObject.Heart.down,split.by = "orig.ident")
+
+
+PCW10_Brain <- read.csv("../Data/ISS/PCW10_Brain/GeneCoord.csv", stringsAsFactors = FALSE)
+PCW8_Brain <- read.csv("../Data/ISS/PCW8_Brain/GeneCoord.csv", stringsAsFactors = FALSE)
+
+PCW12_Heart <- read.csv("../Data/ISS/PCW12_Heart/GeneCoord.csv", stringsAsFactors = FALSE)
+PCW10_Heart <- read.csv("../Data/ISS/PCW10_Heart/GeneCoord.csv", stringsAsFactors = FALSE)
+PCW8_Heart <- read.csv("../Data/ISS/PCW8_Heart/GeneCoord.csv", stringsAsFactors = FALSE)
+PCW7_Heart <- read.csv("../Data/ISS/PCW7_Heart/GeneCoord.csv", stringsAsFactors = FALSE)
+
+PCW10_Brain <- merge(PCW10_Brain,scObject.Brain.down$PCW10_Brain@meta.data,by="cell")
+PCW8_Brain <- merge(PCW8_Brain,scObject.Brain.down$PCW8_Brain@meta.data,by="cell")
+
+PCW7_Heart <- merge(PCW7_Heart,scObject.Heart.down$PCW7_Heart@meta.data,by="cell")
+PCW8_Heart <- merge(PCW8_Heart,scObject.Heart.down$PCW8_Heart@meta.data,by="cell")
+PCW10_Heart <- merge(PCW10_Heart,scObject.Heart.down$PCW10_Heart@meta.data,by="cell")
+PCW12_Heart <- merge(PCW12_Heart,scObject.Heart.down$PCW12_Heart@meta.data,by="cell")
+
+write.csv(PCW10_Brain, "../Results/ISS/PCW10_Brain_ISS.coord_sub_newTEST.csv")
+write.csv(PCW8_Brain,  "../Results/ISS/PCW8_Brain_ISS.coord_sub_newTEST.csv")
+
+write.csv(PCW7_Heart,  "../Results/ISS/PCW7_Heart_ISS.coord_sub_newTEST.csv")
+write.csv(PCW8_Heart,  "../Results/ISS/PCW8_Heart_ISS.coord_sub_newTEST.csv")
+write.csv(PCW10_Heart,  "../Results/ISS/PCW10_Heart_ISS.coord_sub_newTEST.csv")
+write.csv(PCW12_Heart,  "../Results/ISS/PCW12_Heart_ISS.coord_sub_newTEST.csv")
+
+load(file = "../Rsave/scObject.Heart_Brain.down.alg.2_sketch.Rdata")
+DefaultAssay(scObject.Brain.down) <- "SCT"
+DefaultAssay(scObject.Heart.down) <- "SCT"
+scObject.Brain.down <- PrepSCTFindMarkers(scObject.Brain.down)
+scObject.Heart.down <- PrepSCTFindMarkers(scObject.Heart.down)
+
+
+scObject.Brain.down$Sketch_knn_res.1 <- factor(scObject.Brain.down$Sketch_knn_res.1,levels = as.character(sort(as.numeric(unique(scObject.Brain.down$Sketch_knn_res.1)))))
+scObject.Heart.down$Sketch_knn_res.1 <- factor(scObject.Heart.down$Sketch_knn_res.1,levels = as.character(sort(as.numeric(unique(scObject.Heart.down$Sketch_knn_res.1)))))
+
+scObject.Brain.down$Leiden_res.1 <- factor(scObject.Brain.down$Leiden_res.1,levels = as.character(sort(as.numeric(unique(scObject.Brain.down$Leiden_res.1)))))
+scObject.Heart.down$Leiden_res.1 <- factor(scObject.Heart.down$Leiden_res.1,levels = as.character(sort(as.numeric(unique(scObject.Heart.down$Leiden_res.1)))))
+
+
+BRAIN.DEG <- FindAllMarkers(scObject.Brain.down,group.by = "Sketch_knn_res.1",only.pos = T,logfc.threshold = 0.4)
+HEART.DEG <- FindAllMarkers(scObject.Heart.down,group.by = "Sketch_knn_res.1",only.pos = T,logfc.threshold = 0.4)
+BRAIN.DEG.leiden <- FindAllMarkers(scObject.Brain.down,group.by = "Leiden_res.1",only.pos = T,logfc.threshold = 0.4)
+HEART.DEG.leiden <- FindAllMarkers(scObject.Heart.down,group.by = "Leiden_res.1",only.pos = T,logfc.threshold = 0.4)
+
+BRAIN.DEG[order(-BRAIN.DEG$avg_log2FC, -BRAIN.DEG$p_val_adj),]
+
+
+
+brain.louvain.deg.tops <- c()
+for (clusters in unique(BRAIN.DEG$cluster)) {
+  x <- subset(BRAIN.DEG, cluster == clusters & p_val_adj<0.05)
+  x <- x[order(-x$avg_log2FC, -x$p_val_adj),][1:20,]
+  brain.louvain.deg.tops <- rbind(brain.louvain.deg.tops,x)
+}
+
+heart.louvain.deg.tops <- c()
+for (clusters in unique(HEART.DEG$cluster)) {
+  x <- subset(HEART.DEG, cluster == clusters & p_val_adj<0.05)
+  x <- x[order(-x$avg_log2FC, -x$p_val_adj),][1:20,]
+  heart.louvain.deg.tops <- rbind(heart.louvain.deg.tops,x)
+}
+
+brain.leiden.deg.tops <- c()
+for (clusters in unique(BRAIN.DEG.leiden$cluster)) {
+  x <- subset(BRAIN.DEG.leiden, cluster == clusters & p_val_adj<0.05)
+  x <- x[order(-x$avg_log2FC, -x$p_val_adj),][1:20,]
+  brain.leiden.deg.tops <- rbind(brain.leiden.deg.tops,x)
+}
+
+heart.leiden.deg.tops <- c()
+for (clusters in unique(HEART.DEG.leiden$cluster)) {
+  x <- subset(HEART.DEG.leiden, cluster == clusters & p_val_adj<0.05)
+  x <- x[order(-x$avg_log2FC, -x$p_val_adj),][1:20,]
+  heart.leiden.deg.tops <- rbind(heart.leiden.deg.tops,x)
+}
+
+
+brain.louvain.deg.tops <- brain.louvain.deg.tops[complete.cases(brain.louvain.deg.tops),]
+heart.louvain.deg.tops <- heart.louvain.deg.tops[complete.cases(heart.louvain.deg.tops),]
+brain.leiden.deg.tops <- brain.leiden.deg.tops[complete.cases(brain.leiden.deg.tops),]
+heart.leiden.deg.tops <- heart.leiden.deg.tops[complete.cases(heart.leiden.deg.tops),]
+
+write.csv(brain.louvain.deg.tops,"/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Results/ISS/ClusterPlots/BRAIN.DEG.Louvain.csv")
+write.csv(heart.louvain.deg.tops,"/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Results/ISS/ClusterPlots/HEART.DEG.Louvain.csv")
+write.csv(brain.leiden.deg.tops,"/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Results/ISS/ClusterPlots/BRAIN.DEG.leiden.csv")
+write.csv(heart.leiden.deg.tops,"/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Results/ISS/ClusterPlots/HEART.DEG.leiden.csv")
+
+
+
+
+brain.louvain.deg.PLOT <- DotPlot(subset(scObject.Brain.down,subset = !is.na(`Sketch_knn_res.1`)),features = na.omit(unique(brain.louvain.deg.tops$gene)),group.by = "Sketch_knn_res.1")+scale_color_gradient2(low = "grey60",mid = "white",high = "purple3")+theme_bw()+theme(axis.text = element_text(face = "bold",size = 20),title = element_text(face = "bold",size = 20))+rotate_x_text(90)+ggtitle("Brain.Louvain(Sketched)_res.1")
+
+heart.louvain.deg.PLOT <- DotPlot(subset(scObject.Heart.down,subset = !is.na(`Sketch_knn_res.1`)),features = na.omit(unique(heart.louvain.deg.tops$gene)),group.by = "Sketch_knn_res.1")+scale_color_gradient2(low = "grey60",mid = "white",high = "purple3")+theme_bw()+theme(axis.text = element_text(face = "bold",size = 20),title = element_text(face = "bold",size = 20))+rotate_x_text(90)+ggtitle("Heart.Louvain(Sketched)_res.1")
+
+
+brain.leiden.deg.PLOT <- DotPlot(scObject.Brain.down,features = na.omit(unique(brain.leiden.deg.tops$gene)),group.by = "Leiden_res.1")+scale_color_gradient2(low = "grey60",mid = "white",high = "purple3")+theme_bw()+theme(axis.text = element_text(face = "bold",size = 20),title = element_text(face = "bold",size = 20))+rotate_x_text(90)+ggtitle("Brain.Leiden_res.1")
+
+heart.leiden.deg.PLOT <- DotPlot(scObject.Heart.down,features = na.omit(unique(heart.leiden.deg.tops$gene)),group.by = "Leiden_res.1")+scale_color_gradient2(low = "grey60",mid = "white",high = "purple3")+theme_bw()+theme(axis.text = element_text(face = "bold",size = 20),title = element_text(face = "bold",size = 20))+rotate_x_text(90)+ggtitle("Heart.Leiden_res.1")
+
+
+pdf("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Results/ISS/ClusterPlots/brain.louvain.deg.PLOT.pdf",width = 35,height = 15)
+brain.louvain.deg.PLOT
+dev.off()
+
+pdf("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Results/ISS/ClusterPlots/heart.louvain.deg.PLOT.pdf",width = 35,height = 15)
+heart.louvain.deg.PLOT
+dev.off()
+
+
+pdf("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Results/ISS/ClusterPlots/brain.leiden.deg.PLOT.pdf",width = 35,height = 15)
+brain.leiden.deg.PLOT
+dev.off()
+
+pdf("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Results/ISS/ClusterPlots/heart.leiden.deg.PLOT.pdf",width = 35,height = 15)
+heart.leiden.deg.PLOT
+dev.off()
+
+
+genes <- list(
+  Pan_EC = c("PECAM1", "CDH5", "VWF"),
+  Capillary_BBB_like = c("MFSD2A", "SLC7A5", "ABCB1", "APCDD1"),
+  Venous = c("FLT1", "EMCN", "NR2F2"),
+  Arterial = c("GJA4", "UNC5B", "DLL4", "HEY1"),
+  Tip_angiogenic = c("APLN", "ADM", "ANGPT2", "ESM1"),
+  Lymphatic = c("PROX1", "LYVE1", "MMRN1"),
+  Pericyte = c("PDGFRB", "ABCC9", "KCNJ8"),
+  SMC = c("ACTA2", "TAGLN"),
+  Fibroblast = c("COL1A1", "DCN", "OGN", "LUM")
+)
+
+genes <- unique(unlist(genes))
+
+
+brain.louvain.deg.PLOT <- DotPlot(subset(scObject.Brain.down,subset = !is.na(`Sketch_knn_res.1`)),features = genes,group.by = "Sketch_knn_res.1")+scale_color_gradient2(low = "grey60",mid = "white",high = "purple3")+theme_bw()+theme(axis.text = element_text(face = "bold",size = 20),title = element_text(face = "bold",size = 20))+rotate_x_text(90)+ggtitle("Brain.Louvain(Sketched)_res.1")
+
+heart.louvain.deg.PLOT <- DotPlot(subset(scObject.Heart.down,subset = !is.na(`Sketch_knn_res.1`)),features = genes,group.by = "Sketch_knn_res.1")+scale_color_gradient2(low = "grey60",mid = "white",high = "purple3")+theme_bw()+theme(axis.text = element_text(face = "bold",size = 20),title = element_text(face = "bold",size = 20))+rotate_x_text(90)+ggtitle("Heart.Louvain(Sketched)_res.1")
+
+
+brain.leiden.deg.PLOT <- DotPlot(scObject.Brain.down,features = genes,group.by = "Leiden_res.1")+scale_color_gradient2(low = "grey60",mid = "white",high = "purple3")+theme_bw()+theme(axis.text = element_text(face = "bold",size = 20),title = element_text(face = "bold",size = 20))+rotate_x_text(90)+ggtitle("Brain.Leiden_res.1")
+
+heart.leiden.deg.PLOT <- DotPlot(scObject.Heart.down,features = genes,group.by = "Leiden_res.1")+scale_color_gradient2(low = "grey60",mid = "white",high = "purple3")+theme_bw()+theme(axis.text = element_text(face = "bold",size = 20),title = element_text(face = "bold",size = 20))+rotate_x_text(90)+ggtitle("Heart.Leiden_res.1")
+
+
+pdf("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Results/ISS/ClusterPlots/brain.louvain.PLOT_markers.pdf",width = 10,height = 15)
+brain.louvain.deg.PLOT
+dev.off()
+
+pdf("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Results/ISS/ClusterPlots/heart.louvain.PLOT_markers.pdf",width = 10,height = 15)
+heart.louvain.deg.PLOT
+dev.off()
+
+
+pdf("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Results/ISS/ClusterPlots/brain.leiden.PLOT_markers.pdf",width = 10,height = 15)
+brain.leiden.deg.PLOT
+dev.off()
+
+pdf("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Results/ISS/ClusterPlots/heart.leiden.PLOT_markers.pdf",width = 10,height = 15)
+heart.leiden.deg.PLOT
+dev.off()
+
+
+p1 <- DimPlot(scObject.Brain.down,group.by = "Leiden_res.1",label = T)+ggtitle("Brain.Leiden_res.1")
+p2 <- DimPlot(scObject.Heart.down,group.by = "Leiden_res.1",label = T)+ggtitle("Heart.Leiden_res.1")
+p3 <- DimPlot(subset(scObject.Brain.down,subset = !is.na(`Sketch_knn_res.1`)),group.by = "Sketch_knn_res.1",label = T)+ggtitle("Brain.Louvain(Sketched)_res.1")
+p4 <- DimPlot(subset(scObject.Heart.down,subset = !is.na(`Sketch_knn_res.1`)),group.by = "Sketch_knn_res.1",label = T)+ggtitle("Heart.Louvain(Sketched)_res.1")
+
+
+pdf("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Results/ISS/ClusterPlots/UMAP_LOUVAIN.pdf",width = 25,height = 12)
+p3+p4
+
+dev.off()
+
+pdf("/cfs/klemming/projects/supr/naiss2023-6-180/elyasmo/Projects/Tiantan/Results/ISS/ClusterPlots/UMAP_LEIDEN.pdf",width = 25,height = 12)
+p1+p2
+dev.off()
+
+
+
+```
+
+
+
+```{r scObject,fig.width=20,fig.height=10}
+
+load(file = "../Rsave/scObject.Heart_Brain.down.alg.2_sketch.Rdata")
+
+scObject.Brain.down <- SetIdent(scObject.Brain.down,value = "Leiden_res.1")
+scObject.Heart.down <- SetIdent(scObject.Heart.down,value = "Leiden_res.1")
+
+scObject.Brain.down <- RenameIdents(scObject.Brain.down,
+                     "1" = "Proliferative",
+                     "2" = "ECs_Cpillary",
+                     "3" = "Endocardial-like",
+                     "4" = "Neurons",
+                     "5" = "Proliferative",
+                     "6" = "Neural progenitor",
+                     "7" = "Neurons",
+                     "8" = "Tip cells",
+                     "9" = "Meningeal/Mesenchyme",
+                     "10" = "Neurons",
+                     "11" = "Neurons",
+                     "12" = "OPC",
+                     "13" = "ECs_Arterial",
+                     "14" = "Neurons",
+                     "15" = "ECs_Venous",
+                     "16" = "SMCs",
+                     "17" = "ECs_Lymphatic",
+                     "18" = "Neurons",
+                     "19" = "ECs_Cpillary",
+                     "20" = "Neurons",
+                     "21" = "Mesenchyme",
+                     "22" = "Mural_Pericytes",
+                     "23" = "Proliferative")
+
+scObject.Brain.down$Annotation <- Idents(scObject.Brain.down)
+
+scObject.Heart.down <- RenameIdents(scObject.Heart.down,
+                     "1" = "Ventricular Cardiomyocytes",
+                     "2" = "SMCs",
+                     "3" = "Atrial Cardiomyocytes",
+                     "4" = "ECs_Cpillary",
+                     "5" = "Mural_Pericytes",
+                     "6" = "ECM rich perivascular cells",
+                     "7" = "Mixed Atrial/AV Canal Myocardium",
+                     "8" = "Mixed ECs",
+                     "9" = "Erythrocytes",
+                     "10" = "Proliferative",
+                     "11" = "Proliferative",
+                     "12" = "Fibroblasts(Valve Mesenchyme/Precursors)",
+                     "13" = "ECs_Lymphatic",
+                     "14" = "Proliferative ECs_Lymphatic",
+                     "15" = "Ventricular Cardiomyocytes",
+                     "16" = "Mesenchyme",
+                     "17" = "Endocardial-like",
+                     "18" = "Cardiac Neural Crest",
+                     "19" = "ECs_Lymphatic",
+                     "20" = "SMCs",
+                     "21" = "Endocardial-like")
+
+
+scObject.Brain.down$Annotation <- Idents(scObject.Brain.down)
+scObject.Heart.down$Annotation <- Idents(scObject.Heart.down)
+
+save(scObject.Brain.down,scObject.Heart.down,file = "../Rsave/scObject.Heart_Brain.down.alg.2_sketch.Rdata")
+
+scObject.Brain.down <- SplitObject(scObject.Brain.down,split.by = "orig.ident")
+scObject.Heart.down <- SplitObject(scObject.Heart.down,split.by = "orig.ident")
+
+
+PCW10_Brain <- read.csv("../Data/ISS/PCW10_Brain/GeneCoord.csv", stringsAsFactors = FALSE)
+PCW8_Brain <- read.csv("../Data/ISS/PCW8_Brain/GeneCoord.csv", stringsAsFactors = FALSE)
+
+PCW12_Heart <- read.csv("../Data/ISS/PCW12_Heart/GeneCoord.csv", stringsAsFactors = FALSE)
+PCW10_Heart <- read.csv("../Data/ISS/PCW10_Heart/GeneCoord.csv", stringsAsFactors = FALSE)
+PCW8_Heart <- read.csv("../Data/ISS/PCW8_Heart/GeneCoord.csv", stringsAsFactors = FALSE)
+PCW7_Heart <- read.csv("../Data/ISS/PCW7_Heart/GeneCoord.csv", stringsAsFactors = FALSE)
+
+PCW10_Brain <- merge(PCW10_Brain,scObject.Brain.down$PCW10_Brain@meta.data,by="cell")
+PCW8_Brain <- merge(PCW8_Brain,scObject.Brain.down$PCW8_Brain@meta.data,by="cell")
+
+PCW7_Heart <- merge(PCW7_Heart,scObject.Heart.down$PCW7_Heart@meta.data,by="cell")
+PCW8_Heart <- merge(PCW8_Heart,scObject.Heart.down$PCW8_Heart@meta.data,by="cell")
+PCW10_Heart <- merge(PCW10_Heart,scObject.Heart.down$PCW10_Heart@meta.data,by="cell")
+PCW12_Heart <- merge(PCW12_Heart,scObject.Heart.down$PCW12_Heart@meta.data,by="cell")
+
+PCW10_Brain <- PCW10_Brain[,-c(7:14,17:30)]
+PCW10_Heart <- PCW10_Heart[,-c(7:14,17:30)]
+PCW12_Heart <- PCW12_Heart[,-c(7:14,17:30)]
+
+write.csv(PCW10_Brain, "../Results/ISS/PCW10_Brain_ISS.coord_sub_newTEST.csv")
+write.csv(PCW8_Brain,  "../Results/ISS/PCW8_Brain_ISS.coord_sub_newTEST.csv")
+
+write.csv(PCW7_Heart,  "../Results/ISS/PCW7_Heart_ISS.coord_sub_newTEST.csv")
+write.csv(PCW8_Heart,  "../Results/ISS/PCW8_Heart_ISS.coord_sub_newTEST.csv")
+write.csv(PCW10_Heart,  "../Results/ISS/PCW10_Heart_ISS.coord_sub_newTEST.csv")
+write.csv(PCW12_Heart,  "../Results/ISS/PCW12_Heart_ISS.coord_sub_newTEST.csv")
+
+```
+
+
+```{r scObject,fig.width=20,fig.height=10}
+load(file = "../Rsave/scObject.Heart_Brain.down.alg.2_sketch.Rdata")
+scObject.Brain.down@reductions$Spatial@cell.embeddings[,2] <- scObject.Brain.down@reductions$Spatial@cell.embeddings[,2]*-1
+scObject.Heart.down@reductions$Spatial@cell.embeddings[,2] <- scObject.Heart.down@reductions$Spatial@cell.embeddings[,2]*-1
+
+
+
+celltype_cols_list <- c(
+  "Proliferative" = "#00FFFF",
+  "ECs_Cpillary" = "#1E90FF",
+  "ECs_Arterial" = "#FF1493",
+  "ECs_Venous" = "#FF8C00",
+  "ECs_Lymphatic" = "#7CFC00",
+  "Proliferative ECs_Lymphatic" = "#00FA9A",
+  "Tip cells" = "#FFD700",
+  "Mixed ECs" = "#00BFFF",
+  "Endocardial-like" = "#FFFF00",
+
+  "Neurons" = "#FF00FF",
+  "Neural progenitor" = "#9400D3",
+  "OPC" = "#8A2BE2",
+  "Cardiac Neural Crest" = "#ADFF2F",
+
+  "SMCs" = "#00FF00",
+  "Mural_Pericytes" = "#32CD32",
+  "ECM rich perivascular cells" = "#ff00ff",
+  "Mesenchyme" = "#FF6347",
+  "Meningeal/Mesenchyme" = "#FF7F50",
+  "Fibroblasts(Valve Mesenchyme/Precursors)" = "#FFB6C1",
+
+  "Ventricular Cardiomyocytes" = "#00CED1",
+  "Atrial Cardiomyocytes" = "#ff5500",
+  "Mixed Atrial/AV Canal Myocardium" = "#aa00ff",
+
+  "Erythrocytes" = "#aa0000"
+)
+
+
+
+##python for the tissuumaps
+
+# { "Proliferative": "#00FFFF",
+#     "ECs_Cpillary": "#1E90FF",
+#     "ECs_Arterial": "#FF1493",
+#     "ECs_Venous": "#FF8C00",
+#     "ECs_Lymphatic": "#7CFC00",
+#     "Proliferative ECs_Lymphatic": "#00FA9A",
+#     "Tip cells": "#FFD700",
+#     "Mixed ECs": "#00BFFF",
+#     "Endocardial-like": "#FFFF00",
+# 
+#     "Neurons": "#FF00FF",
+#     "Neural progenitor": "#9400D3",
+#     "OPC": "#8A2BE2",
+#     "Cardiac Neural Crest": "#ADFF2F",
+# 
+#     "SMCs": "#00FF00",
+#     "Mural_Pericytes": "#32CD32",
+#     "ECM rich perivascular cells": "#ff00ff",
+#     "Mesenchyme": "#FF6347",
+#     "Meningeal/Mesenchyme": "#FF7F50",
+#     "Fibroblasts(Valve Mesenchyme/Precursors)": "#FFB6C1",
+# 
+#     "Ventricular Cardiomyocytes": "#00CED1",
+#     "Atrial Cardiomyocytes": "#ff5500",
+#     "Mixed Atrial/AV Canal Myocardium": "#aa00ff",
+# 
+#     "Erythrocytes": "#aa0000"
+# }
+
+
+p2 <- DimPlot(scObject.Brain.down,group.by = "Annotation",label = F,cols = celltype_cols_list,reduction = "umap_harmomy")+ggtitle("Brain")+
+  xlab("UMAP 1")+ylab("UMAP 2")
+
+pdf("../Results/ISS/Ling/Plots/UMAP_Brain.pdf",width = 10,height = 8)
+p2
+dev.off()
+
+
+scObject.Brain.down <- SplitObject(scObject.Brain.down,split.by = "orig.ident")
+scObject.Heart.down <- SplitObject(scObject.Heart.down,split.by = "orig.ident")
+
+
+obj <- scObject.Brain.down$PCW8_Brain
+obj$Annotation <- as.character(obj$Annotation)
+Idents(obj) <- "Annotation"
+celltypes <- unique(obj$Annotation)
+pics <- list()
+
+
+for (types in celltypes) {
+cells_list <- lapply(types, function(t) WhichCells(obj, expression = Annotation == t))
+names(cells_list) <- types
+
+# all_levels <- levels(Idents(obj))
+# grey_cols <- setNames(rep("grey30", length(all_levels)), all_levels)
+hi_cols <- unname(celltype_cols_list[as.character(types)])  # must not contain NA
+cols_named <- setNames(hi_cols, types)
+
+pics[[types]] <- DimPlot(
+  obj,
+  reduction = "Spatial",
+  group.by = "Annotation",
+  raster = FALSE,
+  cols = cols_named,
+  cells.highlight = cells_list,
+  cols.highlight = hi_cols,
+  sizes.highlight = .003,
+  pt.size = 0.0005
+)+
+  xlab("") +
+  ylab("") +
+  ggtitle(types) +
+  theme(
+    panel.background = element_rect(fill = "black", colour = NA),
+    plot.background  = element_rect(fill = "black", colour = NA),
+    legend.background = element_rect(fill = "black", colour = NA),
+    legend.key = element_rect(fill = "black", colour = NA),
+    text = element_text(color = "white"),
+    axis.text = element_text(color = "white",size = 0),
+    axis.title = element_text(color = "white",size = 0),
+    plot.title = element_text(color = "white")
+  )&NoLegend()
+}
+
+
+pdf("../Results/ISS/pics_pcw12_heart.pdf",width = 35,height = 30)
+wrap_plots(pics,ncol = 4)
+dev.off()
+
+
+
+
+p1 <- DimPlot(
+  scObject.Brain.down$PCW10_Brain,
+  reduction = "Spatial",
+  group.by = "Annotation",
+  raster = FALSE,
+  cols = celltype_cols_list,
+  pt.size = 0.0001,alpha = .5
+)+
+  xlab("") +
+  ylab("") +
+  ggtitle("PCW10_Brain") +
+  theme(
+    panel.background = element_rect(fill = "black", colour = NA),
+    plot.background  = element_rect(fill = "black", colour = NA),
+    legend.background = element_rect(fill = "black", colour = NA),
+    legend.key = element_rect(fill = "black", colour = NA),
+    text = element_text(color = "white"),
+    axis.text = element_text(color = "white",size = 0),
+    axis.title = element_text(color = "white",size = 0),
+    plot.title = element_text(color = "white")
+  )
+
+pdf("../Results/ISS/pics_pcw10_brain_all.pdf",width = 17,height = 15)
+p1
+dev.off()
+
+
+```
+
+
+
+
+```{r loading,fig.width=20,fig.height=10}
+
+library(purrr); library(stringr)
+load("../Rsave/scObject.Heart_Brain.down.alg.2.Rdata")
+
+
+scObject.Brain.down$cell <- map2_chr(colnames(scObject.Brain.down), scObject.Brain.down$orig.ident, ~ str_remove(.x, fixed(paste0("_", .y))))
+scObject.Heart.down$cell <- map2_chr(colnames(scObject.Heart.down), scObject.Heart.down$orig.ident, ~ str_remove(.x, fixed(paste0("_", .y))))
+
+
+scObject.Brain.down <- SplitObject(scObject.Brain.down,split.by = "orig.ident")
+scObject.Heart.down <- SplitObject(scObject.Heart.down,split.by = "orig.ident")
+
+
+PCW10_Brain <- read.csv("../Data/ISS/PCW10_Brain/GeneCoord.csv", stringsAsFactors = FALSE)
+PCW8_Brain <- read.csv("../Data/ISS/PCW8_Brain/GeneCoord.csv", stringsAsFactors = FALSE)
+
+PCW12_Heart <- read.csv("../Data/ISS/PCW12_Heart/GeneCoord.csv", stringsAsFactors = FALSE)
+PCW10_Heart <- read.csv("../Data/ISS/PCW10_Heart/GeneCoord.csv", stringsAsFactors = FALSE)
+PCW8_Heart <- read.csv("../Data/ISS/PCW8_Heart/GeneCoord.csv", stringsAsFactors = FALSE)
+PCW7_Heart <- read.csv("../Data/ISS/PCW7_Heart/GeneCoord.csv", stringsAsFactors = FALSE)
+
+PCW10_Brain <- merge(PCW10_Brain,scObject.Brain.down$PCW10_Brain@meta.data[,8:14])
+PCW8_Brain <- merge(PCW8_Brain,scObject.Brain.down$PCW8_Brain@meta.data[,8:14])
+
+PCW7_Heart <- merge(PCW7_Heart,scObject.Heart.down$PCW7_Heart@meta.data[,8:14])
+PCW8_Heart <- merge(PCW8_Heart,scObject.Heart.down$PCW8_Heart@meta.data[,8:14])
+PCW10_Heart <- merge(PCW10_Heart,scObject.Heart.down$PCW10_Heart@meta.data[,8:14])
+PCW12_Heart <- merge(PCW12_Heart,scObject.Heart.down$PCW12_Heart@meta.data[,8:14])
+
+write.csv(head(PCW10_Brain), "../Results/ISS/PCW10_Brain_ISS.coord_sub.csv")
+write.csv(PCW8_Brain,  "../Results/ISS/PCW8_Brain_ISS.coord_sub.csv")
+
+write.csv(PCW7_Heart,  "../Results/ISS/PCW7_Heart_ISS.coord_sub.csv")
+write.csv(PCW8_Heart,  "../Results/ISS/PCW8_Heart_ISS.coord_sub.csv")
+write.csv(PCW10_Heart,  "../Results/ISS/PCW10_Heart_ISS.coord_sub.csv")
+write.csv(PCW12_Heart,  "../Results/ISS/PCW12_Heart_ISS.coord_sub.csv")
+
+
+
+```
+
+
+```{r iNMF,fig.width=20,fig.height=10}
+
+#Rlinger Rcpp loader: loads the packages and links the dependencies 
+
+
+gc()
+proj_lib <- "/cfs/klemming/projects/supr/naiss2023-6-180/Theo/rlinger_build/Rlib"
+h5_root  <- "/cfs/klemming/projects/supr/naiss2023-6-180/Theo/rlinger_build/opt/hdf5-1.12.2"
+h5_lib   <- file.path(h5_root, "lib")
+
+.libPaths(c(proj_lib, .libPaths()))
+Sys.setenv(
+  LD_LIBRARY_PATH = paste(h5_lib, Sys.getenv("LD_LIBRARY_PATH"), sep=":"),
+  HDF5_DIR  = h5_root,
+  HDF5_ROOT = h5_root
+)
+suppressWarnings({
+  try(dyn.load(file.path(h5_lib, "libhdf5.so.200")),     silent = TRUE)
+  try(dyn.load(file.path(h5_lib, "libhdf5_hl.so.200")),  silent = TRUE)
+  try(dyn.load(file.path(h5_lib, "libhdf5_cpp.so.200")), silent = TRUE)
+})
+
+suppressPackageStartupMessages({
+  library(RcppPlanc, lib.loc = proj_lib)
+  library(rliger,     lib.loc = proj_lib)
+  library(Seurat)
+})
+
+library(rliger)
+library(dplyr)
+library(cowplot)
+```
+
+```{r iNMF,fig.width=30,fig.height=10}
+
+load(file = "../Rsave/scObject.Heart_Brain.Rdata")
+
+gc()
+
+
+DefaultAssay(scObject.Brain) <- "ISS"
+DefaultAssay(scObject.Heart) <- "ISS"
+scObject.Brain <- DietSeurat(scObject.Brain,assays = "ISS",dimreducs = F)
+scObject.Heart <- DietSeurat(scObject.Heart,assays = "ISS",dimreducs = F)
+
+scObject.Brain <- UpdateSeuratObject(scObject.Brain)
+scObject.Heart <- UpdateSeuratObject(scObject.Heart)
+
+scObject.Brain[["ISS"]] <- split(scObject.Brain[["ISS"]], f = scObject.Brain$orig.ident)
+scObject.Heart[["ISS"]] <- split(scObject.Heart[["ISS"]], f = scObject.Heart$orig.ident)
+
+
+scObject.Brain <- scObject.Brain %>%
+    normalize() %>%
+    selectGenes() %>%
+    scaleNotCenter()
+
+scObject.Heart <- scObject.Heart %>%
+    normalize() %>%
+    selectGenes() %>%
+    scaleNotCenter()
+
+scObject.Brain <- scObject.Brain %>%
+    runINMF(k = 11) %>%
+    quantileNorm()
+
+scObject.Heart <- scObject.Heart %>%
+    runINMF(k = 20) %>%
+    quantileNorm()
+
+# scObject.Brain <- RunUMAP(scObject.Brain, reduction = "inmfNorm", dims = 1:11)
+# scObject.Heart <- RunUMAP(scObject.Heart, reduction = "inmfNorm", dims = 1:20)
+
+# DimPlot(scObject.Brain,group.by = "orig.ident")
+# DimPlot(scObject.Heart,group.by = "orig.ident")
+
+
+
+
+load("../Rsave/scObject.Heart_Brain.down.alg.2.Rdata")
+
+# cell names (columns) are the keys
+common <- intersect(Cells(scObject.Heart), Cells(scObject.Heart.down))
+scObject.Heart <- subset(scObject.Heart, cells = common)
+
+common <- intersect(Cells(scObject.Brain), Cells(scObject.Brain.down))
+
+scObject.Brain <- subset(scObject.Brain, cells = common)
+
+
+
+scObject.Brain$inmfNorm.cluster <- scObject.Brain %>%
+    FindNeighbors(reduction = "inmfNorm", dims = 1:11) %>%
+    FindClusters(resolution = c(0.5,1))
+
+scObject.Heart <- scObject.Heart %>%
+    FindNeighbors(reduction = "inmfNorm", dims = 1:20) %>%
+    FindClusters(resolution = c(0.5,1))
+
+
+scObject.Heart.down$inmfNorm.cluster <- scObject.Heart$inmfNorm.cluster
+scObject.Brain.down$inmfNorm.cluster <- scObject.Brain$inmfNorm.cluster
+
+
+
+
+
+######################## Label transfering
+
+load(file = "../Rsave/scObject.Heart_Brain_LABEL.transfered.Rdata")
+
+# cell names (columns) are the keys
+common <- intersect(Cells(scObject.Heart), Cells(scObject.Heart.down))
+scObject.Heart <- subset(scObject.Heart, cells = common)
+
+common <- intersect(Cells(scObject.Brain), Cells(scObject.Brain.down))
+
+scObject.Brain <- subset(scObject.Brain, cells = common)
+
+scObject.Heart.down$predicted.id <- scObject.Heart$predicted.id
+scObject.Brain.down$predicted.id <- scObject.Brain$predicted.id
+
+
+
+
+scObject.Brain.down$cell <- map2_chr(colnames(scObject.Brain.down), scObject.Brain.down$orig.ident, ~ str_remove(.x, fixed(paste0("_", .y))))
+scObject.Heart.down$cell <- map2_chr(colnames(scObject.Heart.down), scObject.Heart.down$orig.ident, ~ str_remove(.x, fixed(paste0("_", .y))))
+
+scObject.Brain.down <- SplitObject(scObject.Brain.down,split.by = "orig.ident")
+scObject.Heart.down <- SplitObject(scObject.Heart.down,split.by = "orig.ident")
+
+
+PCW10_Brain <- read.csv("../Data/ISS/PCW10_Brain/GeneCoord.csv", stringsAsFactors = FALSE)
+PCW8_Brain <- read.csv("../Data/ISS/PCW8_Brain/GeneCoord.csv", stringsAsFactors = FALSE)
+
+PCW12_Heart <- read.csv("../Data/ISS/PCW12_Heart/GeneCoord.csv", stringsAsFactors = FALSE)
+PCW10_Heart <- read.csv("../Data/ISS/PCW10_Heart/GeneCoord.csv", stringsAsFactors = FALSE)
+PCW8_Heart <- read.csv("../Data/ISS/PCW8_Heart/GeneCoord.csv", stringsAsFactors = FALSE)
+PCW7_Heart <- read.csv("../Data/ISS/PCW7_Heart/GeneCoord.csv", stringsAsFactors = FALSE)
+
+
+
+PCW10_Brain <- merge(PCW10_Brain,scObject.Brain.down$PCW10_Brain@meta.data[,8:19], by = "cell", all.x = FALSE)
+PCW8_Brain <- merge(PCW8_Brain,scObject.Brain.down$PCW8_Brain@meta.data[,8:19], by = "cell", all.x = FALSE)
+
+
+PCW7_Heart <- merge(PCW7_Heart,scObject.Heart.down$PCW7_Heart@meta.data[,8:19], by = "cell", all.x = FALSE)
+PCW8_Heart <- merge(PCW8_Heart,scObject.Heart.down$PCW8_Heart@meta.data[,8:19], by = "cell", all.x = FALSE)
+PCW10_Heart <- merge(PCW10_Heart,scObject.Heart.down$PCW10_Heart@meta.data[,8:19], by = "cell", all.x = FALSE)
+PCW12_Heart <- merge(PCW12_Heart,scObject.Heart.down$PCW12_Heart@meta.data[,8:19], by = "cell", all.x = FALSE)
+
+
+
+write.csv(PCW10_Brain, "../Results/ISS/PCW10_Brain_ISS.coord_sub.csv")
+write.csv(PCW8_Brain,  "../Results/ISS/PCW8_Brain_ISS.coord_sub.csv")
+
+write.csv(PCW7_Heart,  "../Results/ISS/PCW7_Heart_ISS.coord_sub.csv")
+write.csv(PCW8_Heart,  "../Results/ISS/PCW8_Heart_ISS.coord_sub.csv")
+write.csv(PCW10_Heart,  "../Results/ISS/PCW10_Heart_ISS.coord_sub.csv")
+write.csv(PCW12_Heart,  "../Results/ISS/PCW12_Heart_ISS.coord_sub.csv")
+
+
+
+save(scObject.Brain.down,scObject.Heart.down,file = "../Rsave/scObject.Heart_Brain.down.alg.2_split.Rdata")
+
+scObject.Brain.down <- Reduce(merge,scObject.Brain.down)
+scObject.Heart.down <- Reduce(merge,scObject.Heart.down)
+
+Idents(scObject.Brain.down) <- "SCT_snn_res.2.5"
+Idents(scObject.Heart.down) <- "SCT_snn_res.2.5"
+
+scObject.Brain.down <- PrepSCTFindMarkers(scObject.Brain.down)
+scObject.Heart.down <- PrepSCTFindMarkers(scObject.Heart.down)
+
+brain.dowm.deg <- FindAllMarkers(scObject.Brain.down,features = intersect(unique(PCW10_Brain$feature_name),rownames(scObject.Brain.down@assays$SCT)),logfc.threshold = 0,only.pos = T,group.by = "SCT_snn_res.2.5")
+heart.dowm.deg <- FindAllMarkers(scObject.Heart.down,features = intersect(unique(PCW10_Brain$feature_name),rownames(scObject.Brain.down@assays$SCT)),logfc.threshold = 0,only.pos = T,group.by = "SCT_snn_res.2.5")
+
+
+brain.dowm.deg$cluster <- factor(brain.dowm.deg$cluster,levels =  sort(as.numeric(as.character(unique(brain.dowm.deg$cluster)))))
+heart.dowm.deg$cluster <- factor(heart.dowm.deg$cluster,levels =  sort(as.numeric(as.character(unique(heart.dowm.deg$cluster)))))
+
+brain.dowm.deg <- brain.dowm.deg[order(brain.dowm.deg$cluster),]
+heart.dowm.deg <- heart.dowm.deg[order(heart.dowm.deg$cluster),]
+
+brain.dowm.deg.tops <- c()
+for (clusters in unique(brain.dowm.deg$cluster)) {
+  x <- subset(brain.dowm.deg, cluster == clusters & p_val_adj<0.05)
+  x <- x[order(-x$avg_log2FC, -x$p_val_adj),][1:10,]
+  brain.dowm.deg.tops <- rbind(brain.dowm.deg.tops,x)
+}
+
+heart.dowm.deg.tops <- c()
+for (clusters in unique(heart.dowm.deg$cluster)) {
+  x <- subset(heart.dowm.deg, cluster == clusters & p_val_adj<0.05)
+  x <- x[order(-x$avg_log2FC, -x$p_val_adj),][1:10,]
+  heart.dowm.deg.tops <- rbind(heart.dowm.deg.tops,x)
+}
+
+scObject.Brain.down$SCT_snn_res.2.5 <- factor(scObject.Brain.down$SCT_snn_res.2.5,levels =  sort(as.numeric(as.character(unique(scObject.Brain.down$SCT_snn_res.2.5)))))
+scObject.Heart.down$SCT_snn_res.2.5 <- factor(scObject.Heart.down$SCT_snn_res.2.5,levels =  sort(as.numeric(as.character(unique(scObject.Heart.down$SCT_snn_res.2.5)))))
+
+
+pdf("../Results/ISS/VLN.Down.Brain.pdf",width = 40,height = 15)
+DotPlot(scObject.Brain.down,features = unique(brain.dowm.deg.tops$gene),group.by = "SCT_snn_res.2.5")+scale_color_gradient2(low = "grey60",mid = "white",high = "purple3")+theme_bw()+theme(axis.text = element_text(face = "bold",size = 20),title = element_text(face = "bold",size = 20))+rotate_x_text(90)+ggtitle("Brain.Downsampled.300K")
+dev.off()
+
+pdf("../Results/ISS/VLN.Down.Heart.pdf",width = 40,height = 15)
+DotPlot(scObject.Heart.down,features = unique(heart.dowm.deg.tops$gene),group.by = "SCT_snn_res.2.5")+scale_color_gradient2(low = "grey60",mid = "white",high = "purple3")+theme_bw()+theme(axis.text = element_text(face = "bold",size = 20),title = element_text(face = "bold",size = 20))+rotate_x_text(90)+ggtitle("Heart.Downsampled.300K")
+dev.off()
+
+```
+
+
+```{r iNMF,fig.width=20,fig.height=10}
+
+load("../Rsave/scObject.Heart_Brain.down.alg.2.Rdata")
+
+p1 <- DimPlot(scObject.Brain.down,group.by = "SCT_snn_res.2.5",label = T)+ggtitle("Brain_SCT_snn_res.2.5")+
+ guides(x = axis, y = axis) +xlab("UMAP 1")+ylab("UMAP 2")+
+  theme(axis.line = element_line(arrow = arrow(angle = 20, length = unit(4, "points"))),
+        axis.title = element_text(hjust = 0,size = 10),axis.text.x = element_blank(),
+  axis.text.y = element_blank(),
+  axis.ticks = element_blank())
+
+p2 <- DimPlot(scObject.Heart.down,group.by = "SCT_snn_res.2.5",label = T)+ggtitle("Heart_SCT_snn_res.2.5")+
+ guides(x = axis, y = axis) +xlab("UMAP 1")+ylab("UMAP 2")+
+  theme(axis.line = element_line(arrow = arrow(angle = 20, length = unit(4, "points"))),
+        axis.title = element_text(hjust = 0,size = 10),axis.text.x = element_blank(),
+  axis.text.y = element_blank(),
+  axis.ticks = element_blank())
+
+
+pdf("../Results/ISS/UMAP.pdf",width = 15,height = 30)
+p1/p2
+dev.off()
+
+
+PCW10_Brain <- read.csv( "../Results/ISS/PCW10_Brain_ISS.coord_sub.csv", stringsAsFactors = FALSE)
+PCW8_Brain <- read.csv( "../Results/ISS/PCW8_Brain_ISS.coord_sub.csv", stringsAsFactors = FALSE)
+
+PCW10_Brain$Sample <- "PCW10_Brain"
+PCW8_Brain$Sample <- "PCW8_Brain"
+
+
+Brain <- rbind(PCW10_Brain,PCW8_Brain)
+Brain$cell <- paste(Brain$cell,Brain$Sample,sep = "_")
+scObject.Brain.down@meta.data[,8:15] <- merge(scObject.Brain.down@meta.data[,8:15], PCW10_Brain[8:15],)
+
+
+
+
+PCW7_Heart <- read.csv( "../Results/ISS/PCW7_Heart_ISS.coord_sub.csv", stringsAsFactors = FALSE)
+PCW8_Heart <- read.csv( "../Results/ISS/PCW8_Heart_ISS.coord_sub.csv", stringsAsFactors = FALSE)
+PCW10_Heart <- read.csv( "../Results/ISS/PCW10_Heart_ISS.coord_sub.csv", stringsAsFactors = FALSE)
+PCW12_Heart <- read.csv(  "../Results/ISS/PCW12_Heart_ISS.coord_sub.csv", stringsAsFactors = FALSE)
+
+
+```
+
+
+
+
+
+
+# I want to add the annotations that Ling has produced
+
+```{r iNMF,fig.width=20,fig.height=10}
+
+
+load("../Rsave/scObject.Heart_Brain.down.alg.2.Rdata")
+
+scObject.Brain.down$cell <- map2_chr(colnames(scObject.Brain.down), scObject.Brain.down$orig.ident, ~ str_remove(.x, fixed(paste0("_", .y))))
+scObject.Heart.down$cell <- map2_chr(colnames(scObject.Heart.down), scObject.Heart.down$orig.ident, ~ str_remove(.x, fixed(paste0("_", .y))))
+
+scObject.Brain.down.spl <- SplitObject(scObject.Brain.down,split.by = "orig.ident")
+scObject.Heart.down.spl <- SplitObject(scObject.Heart.down,split.by = "orig.ident")
+
+
+PCW10_Brain <- read.csv("../Results/ISS/Ling/PCW10_Brain.csv", stringsAsFactors = FALSE)
+PCW8_Brain <- read.csv("../Results/ISS/Ling/PCW8_Brain.csv", stringsAsFactors = FALSE)
+
+PCW12_Heart <- read.csv("../Results/ISS/Ling/PCW12_Heart_ISS.coord_sub.csv", stringsAsFactors = FALSE)
+PCW10_Heart <- read.csv("../Results/ISS/Ling/PCW10_Heart_ISS.coord_sub.csv", stringsAsFactors = FALSE)
+PCW8_Heart <- read.csv("../Results/ISS/Ling/PCW8_Heart_ISS.coord_sub.csv", stringsAsFactors = FALSE)
+PCW7_Heart <- read.csv("../Results/ISS/Ling/PCW7_Heart_ISS.coord_sub.csv", stringsAsFactors = FALSE)
+
+
+
+PCW7_Heart$centroid_X <- PCW7_Heart$x_location
+PCW7_Heart$centroid_Y <- PCW7_Heart$y_location
+
+PCW8_Heart$centroid_X <- PCW8_Heart$x_location
+PCW8_Heart$centroid_Y <- PCW8_Heart$y_location
+
+PCW10_Heart$centroid_X <- PCW10_Heart$x_location
+PCW10_Heart$centroid_Y <- PCW10_Heart$y_location
+
+PCW12_Heart$centroid_X <- PCW12_Heart$x_location
+PCW12_Heart$centroid_Y <- PCW12_Heart$y_location
+
+
+scObject.Brain.down.spl$PCW10_Brain <- AddMetaData(scObject.Brain.down.spl$PCW10_Brain,PCW10_Brain[match(scObject.Brain.down.spl$PCW10_Brain$cell,PCW10_Brain$cell),c(20:22)])
+
+scObject.Brain.down.spl$PCW8_Brain <- AddMetaData(scObject.Brain.down.spl$PCW8_Brain,PCW8_Brain[match(scObject.Brain.down.spl$PCW8_Brain$cell,PCW8_Brain$cell),c(20:22)])
+
+
+scObject.Heart.down.spl$PCW7_Heart <- AddMetaData(scObject.Heart.down.spl$PCW7_Heart,PCW7_Heart[match(scObject.Heart.down.spl$PCW7_Heart$cell,PCW7_Heart$cell),c(20:22)])
+scObject.Heart.down.spl$PCW8_Heart <- AddMetaData(scObject.Heart.down.spl$PCW8_Heart,PCW8_Heart[match(scObject.Heart.down.spl$PCW8_Heart$cell,PCW8_Heart$cell),c(20:22)])
+scObject.Heart.down.spl$PCW10_Heart <- AddMetaData(scObject.Heart.down.spl$PCW10_Heart,PCW10_Heart[match(scObject.Heart.down.spl$PCW10_Heart$cell,PCW10_Heart$cell),c(20:22)])
+scObject.Heart.down.spl$PCW12_Heart <- AddMetaData(scObject.Heart.down.spl$PCW12_Heart,PCW12_Heart[match(scObject.Heart.down.spl$PCW12_Heart$cell,PCW12_Heart$cell),c(20:22)])
+
+
+
+scObject.Brain.down.spl <- Reduce(merge,scObject.Brain.down.spl)
+scObject.Heart.down.spl <- Reduce(merge,scObject.Heart.down.spl)
+scObject.Brain.down <- AddMetaData(scObject.Brain.down,scObject.Brain.down.spl@meta.data[,c(18:20)]) 
+scObject.Heart.down <- AddMetaData(scObject.Heart.down,scObject.Heart.down.spl@meta.data[,c(18:20)]) 
+
+scObject.Brain.down <- SetIdent(scObject.Brain.down,value = "annotation")
+
+scObject.Brain.down <- RenameIdents(scObject.Brain.down,
+                     "Neuron_1" = "Cortex neuron",
+                     "Neuron_2" = "Intermediate zone neuron",
+                     "Neuron_3" = "Subventricular zone neuron",
+                     "Neuron_4" = "Cortex neuron",
+                     "Neuron_5" = "Cortex neuron",
+                     "Neuron_6" = "Thalamus neuron",
+                     "Neuron_7" = "Ventricular zone neuron")
+
+scObject.Brain.down$annotation2 <- Idents(scObject.Brain.down)
+
+
+
+## Making a new embedding for this plot with the spatial information
+
+scObject.Brain.down$Age.PCW <- factor(scObject.Brain.down$Age.PCW,levels = c("PCW8","PCW10"))
+scObject.Heart.down$Age.PCW <- factor(scObject.Heart.down$Age.PCW,levels = c("PCW7",   "PCW8" ,"PCW10", "PCW12"))
+
+
+coords <- scObject.Brain.down@meta.data[, c("centroid_X", "centroid_Y")]
+coords <- as.matrix(coords)
+colnames(coords) <- c("Spatial_1", "Spatial_2")
+
+
+scObject.Brain.down[["Spatial"]] <- CreateDimReducObject(
+  embeddings = coords,
+  key = "Spatial_",
+  assay = DefaultAssay(scObject.Brain.down)
+)
+
+
+coords <- scObject.Heart.down@meta.data[, c("centroid_X", "centroid_Y")]
+coords <- as.matrix(coords)
+colnames(coords) <- c("Spatial_1", "Spatial_2")
+
+scObject.Heart.down[["Spatial"]] <- CreateDimReducObject(
+  embeddings = coords,
+  key = "Spatial_",
+  assay = DefaultAssay(scObject.Heart.down)
+)
+
+scObject.Brain.down@reductions$Spatial@cell.embeddings[,2] <- scObject.Brain.down@reductions$Spatial@cell.embeddings[,2]*-1
+scObject.Heart.down@reductions$Spatial@cell.embeddings[,2] <- scObject.Heart.down@reductions$Spatial@cell.embeddings[,2]*-1
+
+
+# save(scObject.Brain.down,scObject.Heart.down,file = "../Rsave/scObject.Heart_Brain.down.alg.2.Rdata")
+
+
+library(Seurat)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# make sure age order is correct
+scObject.Heart.down$Age.PCW <- factor(
+  scObject.Heart.down$Age.PCW,
+  levels = c("PCW7","PCW8","PCW10","PCW12")
+)
+
+
+# average expression (SCT)
+avg_mat <- AverageExpression(
+  scObject.Heart.down,
+  group.by = c("annotation","Age.PCW"),
+  features = c("MKI67","TOP2A"),
+  assays = "SCT",
+  slot = "data"
+)$SCT
+
+# reshape: genes x groups -> long df with Annotation + Age
+df <- as.data.frame(avg_mat) |>
+  tibble::rownames_to_column("gene") |>
+  pivot_longer(-gene, names_to = "group", values_to = "avg_expr") |>
+  separate(group, into = c("annotation","Age.PCW"), sep = "_(?=PCW)", extra = "merge") |>
+  mutate(Age.PCW = factor(Age.PCW, levels = levels(scObject.Heart.down$Age.PCW)))
+
+df$annotation <- gsub("-", "_", df$annotation)
+
+# --- Plot 1: MKI67
+p_mki67 <- df |>
+  filter(gene == "MKI67") |>
+  ggplot(aes(x = Age.PCW, y = avg_expr, group = annotation, color = annotation)) +
+  geom_line(size = 0.8) +
+  geom_point(size = 2) +
+  scale_color_manual(values = cols) +
+  labs(x = "Age (PCW)", y = "Average expression (SCT)", title = "MKI67") +
+  theme_classic()
+
+# --- Plot 2: TOP2A
+p_top2a <- df |>
+  filter(gene == "TOP2A") |>
+  ggplot(aes(x = Age.PCW, y = avg_expr, group = annotation, color = annotation)) +
+  geom_line(size = 0.8) +
+  geom_point(size = 2) +
+  scale_color_manual(values = cols) +
+  labs(x = "Age (PCW)", y = "Average expression (SCT)", title = "TOP2A") +
+  theme_classic()+NoLegend()
+
+pdf("../Results/ISS/Fig2Plots/ISS_Heart_Temporal.Prolifration.pdf",width = 8,height = 6)
+p_top2a+p_mki67
+dev.off()
+
+####################################################################
+####################################################################
+
+load("../Rsave/scObject.Heart_Brain.down.alg.2.Rdata")
+
+
+cols <- c(
+  "ECs_Arterial" = "#FF1493",
+  "ECs_Venous" = "#FF8C00",
+  "ECs_Capillary" = "#1E90FF",
+  "ECs_Lymph" = "green4",
+  "Cortex neuron" = "#213B9C",
+  # "Neuron_2" = "#3150B3",
+  "Intermediate zone neuron" = "#4166CA",
+  # "Neuron_4" = "#517BE1",
+  "Subventricular zone neuron" = "#6D89E8",
+  "Thalamus neuron" = "#8B97EF",
+  "Ventricular zone neuron" = "#A9A5F6",
+  "NSCs" = "#9A62DD",
+  "OPCs" = "#8A2BE2",
+  "Proliferative" = "#00FFFF",
+  "Immune" = "#A2AF3E",
+  "Erythroid lineage cells" = "#E84C9D",
+  "FBs" = "#D69D5F",
+  "FBs_Cardiac" = "#A87147",
+  "FBs_PAAFs" = "purple4",
+  "Pericytes" = "#32CD52",
+  "SMCs" = "green",
+  "CMs_Ventricularmuscle" = "#D84C2F",
+  "CMs_Papillarymuscle" = "#F06F3D",
+  "ECM" = "#D4B174",
+  "EMT"="yellow"
+)
+
+p2 <- DimPlot(scObject.Heart.down,group.by = "annotation",label = F,cols = cols,reduction = "umap_harmomy")+ggtitle("Heart")+
+  xlab("UMAP 1")+ylab("UMAP 2")
+
+pdf("../Results/ISS/Ling/Plots/UMAP_heart.pdf",width = 10,height = 8)
+p2
+dev.off()
+
+
+scObject.Brain.down <- SplitObject(scObject.Brain.down,split.by = "orig.ident")
+scObject.Heart.down <- SplitObject(scObject.Heart.down,split.by = "orig.ident")
+
+
+obj <- scObject.Heart.down$PCW7_Heart
+obj$annotation <- as.character(obj$annotation)
+Idents(obj) <- "annotation"
+celltypes <- unique(obj$annotation)
+pics <- list()
+
+
+for (types in celltypes) {
+cells_list <- lapply(types, function(t) WhichCells(obj, expression = annotation == t))
+names(cells_list) <- types
+
+# all_levels <- levels(Idents(obj))
+# grey_cols <- setNames(rep("grey30", length(all_levels)), all_levels)
+hi_cols <- unname(cols[as.character(types)])  # must not contain NA
+cols_named <- setNames(hi_cols, types)
+
+pics[[types]] <- DimPlot(
+  obj,
+  reduction = "Spatial",
+  group.by = "annotation",
+  raster = FALSE,
+  cols = cols_named,
+  cells.highlight = cells_list,
+  cols.highlight = hi_cols,
+  sizes.highlight = .003,
+  pt.size = 0.0005
+)+
+  xlab("") +
+  ylab("") +
+  ggtitle(types) +
+  theme(
+    panel.background = element_rect(fill = "black", colour = NA),
+    plot.background  = element_rect(fill = "black", colour = NA),
+    legend.background = element_rect(fill = "black", colour = NA),
+    legend.key = element_rect(fill = "black", colour = NA),
+    text = element_text(color = "white"),
+    axis.text = element_text(color = "white",size = 0),
+    axis.title = element_text(color = "white",size = 0),
+    plot.title = element_text(color = "white")
+  )&NoLegend()
+}
+
+
+pdf("../Results/ISS/Ling/Plots/pics_pcw7_heart_Ling.pdf",width = 15,height = 15)
+wrap_plots(pics,ncol = 4)
+dev.off()
+
+
+p1 <- DimPlot(
+  obj,
+  reduction = "Spatial",
+  group.by = "annotation",
+  raster = FALSE,
+  cols = cols,
+  pt.size = 0.0001,alpha = .8
+)+
+  xlab("") +
+  ylab("") +
+  ggtitle("PCW7_Heart") +
+  theme(
+    panel.background = element_rect(fill = "black", colour = NA),
+    plot.background  = element_rect(fill = "black", colour = NA),
+    legend.background = element_rect(fill = "black", colour = NA),
+    legend.key = element_rect(fill = "black", colour = NA),
+    text = element_text(color = "white"),
+    axis.text = element_text(color = "white",size = 0),
+    axis.title = element_text(color = "white",size = 0),
+    plot.title = element_text(color = "white")
+  )
+
+pdf("../Results/ISS/Ling/Plots/pics_pcw7_heart_Ling_all.pdf",width = 8,height = 6)
+p1
+dev.off()
+
+
+
+
+```
+
+
+
+```{r iNMF,fig.width=20,fig.height=10}
+
+library(ggplot2)
+
+# Get UMAP ranges from the Seurat object
+emb <- Embeddings(scObject.Brain.down, "umap_harmomy")
+xr  <- range(emb[, 1])
+yr  <- range(emb[, 2])
+
+# how long you want the axes (as fraction of range)
+frac <- 0.12
+
+p1 <- DimPlot(scObject.Brain.down,label = F,repel = F,raster = FALSE,group.by = "annotation2",cols = cols) +
+    NoLegend() +
+    ggtitle("Brain") +
+    xlab("UMAP 1") +
+    ylab("UMAP 2") +
+    theme_classic() +
+    theme(
+        axis.title = element_text(hjust = 0,size = 10),axis.text.x  = element_blank(),axis.text.y  = element_blank(),axis.ticks   = element_blank(),axis.line = element_blank()  # IMPORTANT: remove default full-length axes
+    ) +
+    # short x-axis arrow
+    geom_segment(inherit.aes = FALSE,x = xr[1],xend = xr[1] + diff(xr) * frac,y = yr[1],yend = yr[1],arrow = arrow(angle = 20, length = unit(4, "points")),linewidth = 0.5
+    ) +
+    # short y-axis arrow
+    geom_segment(inherit.aes = FALSE,x = xr[1],xend = xr[1],y = yr[1],yend = yr[1] + diff(yr) * frac,arrow = arrow(angle = 20, length = unit(4, "points")),linewidth = 0.5)
+
+
+p2 <- DimPlot(scObject.Heart.down,label = F,repel = F,raster = FALSE,group.by = "annotation",cols = cols) +
+    NoLegend() +
+    ggtitle("Heart") +
+    xlab("UMAP 1") +
+    ylab("UMAP 2") +
+    theme_classic() +
+    theme(
+        axis.title = element_text(hjust = 0,size = 0),axis.text.x  = element_blank(),axis.text.y  = element_blank(),axis.ticks   = element_blank(),axis.line = element_blank()  # IMPORTANT: remove default full-length axes
+    ) +
+    # short x-axis arrow
+    geom_segment(inherit.aes = FALSE,x = xr[1],xend = xr[1] + diff(xr) * frac,y = yr[1],yend = yr[1],arrow = arrow(angle = 20, length = unit(0, "points")),linewidth = 0
+    ) +
+    # short y-axis arrow
+    geom_segment(inherit.aes = FALSE,x = xr[1],xend = xr[1],y = yr[1],yend = yr[1] + diff(yr) * frac,arrow = arrow(angle = 20, length = unit(0, "points")),linewidth = 0)
+
+
+pdf("../Results/Manuscript/Figure1/ISS.UMAP.pdf",width = 15,height = 5.5)
+p1+p2
+dev.off()
+
+
+
+
+p1 <- DimPlot(subset(scObject.Brain.down, cells = colnames(scObject.Brain.down@assays$sketch@counts)), reduction = "Spatial",
+         group.by = "orig.ident", label = F,split.by = "Age.PCW",ncol = 2,pt.size = .01,raster = F)+xlab("centroid_X")+ylab("centroid_Y")+ggtitle("Brain")
+
+
+
+p2 <- DimPlot(subset(scObject.Heart.down, cells = colnames(scObject.Heart.down@assays$sketch@counts)), reduction = "Spatial",
+         group.by = "orig.ident", label = F,split.by = "Age.PCW",ncol = 2,pt.size = .01,raster = F)+xlab("centroid_X")+ylab("centroid_Y")+ggtitle("Heart")
+
+
+pdf("../Results/Manuscript/Figure1/ISS.Spatial.Brain.rasterT.pdf",width = 12,height = 5)
+p1
+dev.off()
+
+pdf("../Results/Manuscript/Figure1/ISS.Spatial.Heart.rasterT.pdf",width = 12,height = 9)
+p2
+dev.off()
+
+
+scObject.Brain.down$annotation2 <- factor(scObject.Brain.down$annotation2,levels = sort(unique(scObject.Brain.down$annotation2)))
+scObject.Heart.down$annotation <- factor(scObject.Heart.down$annotation,levels = sort(unique(scObject.Heart.down$annotation)))
+
+scObject.Brain.down <- PrepSCTFindMarkers(scObject.Brain.down)
+scObject.Heart.down <- PrepSCTFindMarkers(scObject.Heart.down)
+
+
+DEG.brain <- FindAllMarkers(scObject.Brain.down,only.pos = T,test.use = "MAST",logfc.threshold = 0.4,latent.vars = "Age.PCW",group.by = "annotation2")
+# DEG.Heart <- FindAllMarkers(scObject.Heart.down,only.pos = T,test.use = "MAST",logfc.threshold = 0.4,latent.vars = "Age.PCW",group.by = "annotation")
+
+save(DEG.brain,DEG.Heart,file="../Rsave/ISS.degs.Rdata")
+load(file="../Rsave/ISS.degs.Rdata")
+
+
+tops.rna.brain <- c()
+for (clusters in unique(DEG.brain$cluster)) {
+  x <- subset(DEG.brain, cluster == clusters & p_val_adj<0.05)
+  x <- x[order(-x$avg_log2FC, -x$p_val_adj),][1:3,]
+  tops.rna.brain <- rbind(tops.rna.brain,x)
+}
+
+tops.rna.heart <- c()
+for (clusters in unique(DEG.Heart$cluster)) {
+  x <- subset(DEG.Heart, cluster == clusters & p_val_adj<0.05)
+  x <- x[order(-x$avg_log2FC, -x$p_val_adj),][1:3,]
+  tops.rna.heart <- rbind(tops.rna.heart,x)
+}
+
+
+p1 <- DotPlot(scObject.Brain.down,features = unique(tops.rna.brain$gene),group.by = "annotation2")+scale_color_gradient2(low = "grey60",mid = "white",high = "purple3")+theme_bw()+theme(axis.text = element_text(face = "bold",size = 20),title = element_text(face = "bold",size = 20))+rotate_x_text(90)+ggtitle("Brain")
+
+p2 <- DotPlot(scObject.Heart.down,features = unique(tops.rna.heart$gene),group.by = "annotation")+scale_color_gradient2(low = "grey60",mid = "white",high = "purple3")+theme_bw()+theme(axis.text = element_text(face = "bold",size = 20),title = element_text(face = "bold",size = 20))+rotate_x_text(90)+ggtitle("Heart")
+
+
+pdf("../Results/Manuscript/Figure1/ISS.dotplot.pdf",width = 25,height = 15)
+
+p1/p2
+dev.off()
+
+
+```
+
+
+# MKI67 expression
+
+
+```{r iNMF,fig.width=20,fig.height=10}
+load(file = "../Rsave/scObject.Heart_Brain.down.alg.2_sketch.Rdata")
+RNA.all.int <- readRDS(file="./RNA.int.Rds")
+
+RNA.all.int <- subset(RNA.all.int, Age.PCW !="PCW22")
+RNA.all.int <- SplitObject(RNA.all.int,split.by = "Organ")
+fill_map <- readRDS("../Rsave/fill_map.Rds")
+
+
+RNA.all.int$Brain$Age.PCW <- factor(
+  RNA.all.int$Brain$Age.PCW ,
+  levels = c("PCW04", "PCW05", "PCW06", "PCW07", "PCW08", "PCW09", "PCW10", "PCW12", "PCW13")
+)
+
+RNA.all.int$Heart$Age.PCW <- factor(
+  RNA.all.int$Heart$Age.PCW ,
+  levels = c("PCW04", "PCW05", "PCW06", "PCW07", "PCW08", "PCW10", "PCW12" )
+)
+
+RNA.all.int$Brain$Annotation <- RNA.all.int$Brain$newL3_Cell_type
+RNA.all.int$Heart$Annotation <- RNA.all.int$Heart$newL3_Cell_type
+
+# make sure age order is correct
+scObject.Brain.down$Age.PCW <- factor(
+  scObject.Brain.down$Age.PCW,
+  levels = c("PCW8","PCW10")
+)
+
+obj <- RNA.all.int$Heart
+# average expression (SCT)
+avg_mat <- AverageExpression(
+  obj,
+  group.by = c("Annotation","Age.PCW"),
+  features = c("MKI67","TOP2A"),
+  assays = "RNA",
+  slot = "data"
+)$RNA
+
+# reshape: genes x groups -> long df with Annotation + Age
+df <- as.data.frame(avg_mat) |>
+  tibble::rownames_to_column("gene") |>
+  pivot_longer(-gene, names_to = "group", values_to = "avg_expr") |>
+  separate(group, into = c("Annotation","Age.PCW"), sep = "_(?=PCW)", extra = "merge") |>
+  mutate(Age.PCW = factor(Age.PCW, levels = levels(obj$Age.PCW)))
+
+df$Annotation <- gsub("-", "_", df$Annotation)
+# df$Annotation <- gsub("Endocardial_like","Endocardial-like",df$Annotation)
+# --- Plot 1: MKI67
+p_mki67 <- df |>
+  filter(gene == "MKI67") |>
+  ggplot(aes(x = Age.PCW, y = avg_expr, group = Annotation, color = Annotation)) +
+  geom_line(size = 0.8) +
+  geom_point(size = 2) +
+  scale_color_manual(values = fill_map) +
+  labs(x = "Age (PCW)", y = "Average expression (SCT)", title = "MKI67") +
+  theme_classic()
+
+# --- Plot 2: TOP2A
+p_top2a <- df |>
+  filter(gene == "TOP2A") |>
+  ggplot(aes(x = Age.PCW, y = avg_expr, group = Annotation, color = Annotation)) +
+  geom_line(size = 0.8) +
+  geom_point(size = 2) +
+  scale_color_manual(values = fill_map) +
+  labs(x = "Age (PCW)", y = "Average expression (SCT)", title = "TOP2A") +
+  theme_classic()+NoLegend()
+
+pdf("../Results/ISS/Fig2Plots/RNA_Heart_Temporal.Prolifration.pdf",width = 15,height = 6)
+p_top2a+p_mki67
+dev.off()
+
+
+```
+
+
+```{r iNMF,fig.width=20,fig.height=10}
+
+load(file = "../Rsave/scObject.Heart_Brain.down.alg.2_sketch.Rdata")
+scObject.Brain.down@reductions$Spatial@cell.embeddings[,2] <- scObject.Brain.down@reductions$Spatial@cell.embeddings[,2]*-1
+scObject.Heart.down@reductions$Spatial@cell.embeddings[,2] <- scObject.Heart.down@reductions$Spatial@cell.embeddings[,2]*-1
+
+scObject.Brain.down <- SplitObject(scObject.Brain.down,split.by = "orig.ident")
+scObject.Heart.down <- SplitObject(scObject.Heart.down,split.by = "orig.ident")
+
+DefaultAssay(scObject.Brain.down) <- "SCT"
+DefaultAssay(scObject.Heart.down) <- "SCT"
+
+
+obj <- scObject.Brain.down$PCW8_Brain
+
+p1 <- DimPlot(
+  obj,
+  reduction = "Spatial",
+  group.by = "Annotation",
+  raster = FALSE,
+  cols = celltype_cols_list,
+  pt.size = 0.0001,
+  alpha = .8
+) +
+  scale_x_continuous(
+    limits = c(x_min, x_max),
+    breaks = seq(floor(x_min/400)*400, ceiling(x_max/400)*400, by = 400)
+  ) +
+  scale_y_continuous(
+    limits = c(y_min, y_max),
+    breaks = seq(floor(y_min/400)*400, ceiling(y_max/400)*400, by = 400)
+  ) +
+  xlab("") +
+  ylab("") +
+  ggtitle("PCW12_Heart") +
+  theme(
+    panel.background = element_rect(fill = "black", colour = NA),
+    plot.background  = element_rect(fill = "black", colour = NA),
+    legend.background = element_rect(fill = "black", colour = NA),
+    legend.key = element_rect(fill = "black", colour = NA),
+
+    # 👇 add grids
+    panel.grid.major = element_line(color = "grey40", size = 0.8),
+    panel.grid.minor = element_line(color = "grey20", size = 0.6),
+
+    text = element_text(color = "white"),
+    axis.text = element_text(color = "white", size = 8),
+    axis.title = element_text(color = "white"),
+    plot.title = element_text(color = "white")
+  ) & NoLegend() + rotate_x_text(70)
+
+library(dplyr)
+
+x <- obj@reductions$Spatial@cell.embeddings[,1]
+y <- obj@reductions$Spatial@cell.embeddings[,2]
+
+obj$ROI <- case_when(
+  x > 23300 & x < 24900 & y > -8400  & y < -6400  ~ "ROI_1",
+  x > 25200 & x < 26800 & y > -12400 & y < -10400 ~ "ROI_2",
+  TRUE ~ "other"
+)
+
+
+
+x_min <- min(obj@reductions$Spatial@cell.embeddings[,1])
+x_max <- max(obj@reductions$Spatial@cell.embeddings[,1])
+y_min <- min(obj@reductions$Spatial@cell.embeddings[,2])
+y_max <- max(obj@reductions$Spatial@cell.embeddings[,2])
+
+p2 <- DimPlot(
+    obj,
+    reduction = "Spatial",
+    group.by = "ROI",
+    raster = FALSE,
+    pt.size = 0.0001,
+    alpha = .8
+) +
+    scale_x_continuous(
+        limits = c(x_min, x_max),
+        breaks = seq(floor(x_min/1000)*1000, ceiling(x_max/1000)*1000, by = 1000)
+    ) +
+    scale_y_continuous(
+        limits = c(y_min, y_max),
+        breaks = seq(floor(y_min/1000)*1000, ceiling(y_max/1000)*1000, by = 1000)
+    ) +
+    xlab("") +
+    ylab("") +
+    ggtitle("Brain_PCW8") +
+    theme(
+        panel.background = element_rect(fill = "black", colour = NA),
+        plot.background  = element_rect(fill = "black", colour = NA),
+        legend.background = element_rect(fill = "black", colour = NA),
+        legend.key = element_rect(fill = "black", colour = NA),
+        text = element_text(color = "white"),
+        axis.text = element_text(color = "white",size = 8),
+        axis.title = element_text(color = "white"),
+        plot.title = element_text(color = "white")
+    ) +rotate_x_text(70)
+
+obj_ROI <- obj
+obj_ROI <- subset(obj_ROI,Annotation=="ECs_Venous" & ROI != "other")
+
+p3 <- VlnPlot(obj_ROI,features = "MKI67",group.by = "ROI",pt.size = 0)+ggtitle("vECs_MKI67")
+```
+
+
